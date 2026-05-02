@@ -23,12 +23,18 @@
 
 ## What's been Implemented (2026-02)
 - JWT auth (login/logout/me) + seed de 3 usuários
-- 8 endpoints REST: dashboard/stats, realtime/calls, agents, agents/{id}, queues, recordings (+filtros), recordings/{id}, reports/agents
-- 6 páginas completas: Dashboard, Tempo Real, Gravações (com audio player sticky), Relatórios (chart + ranking), Filas (cards), Agentes (grid + busca)
-- Sidebar escura + layout responsivo
-- Seed idempotente de agentes, filas, chamadas, gravações
-- data-testid em todos elementos interativos
-- Testing agent: 12/12 backend + frontend 100%
+- 13 endpoints REST: dashboard/stats, dashboard/abandoned, realtime/calls, agents, agents/{id}, queues, recordings (+filtros), recordings/{id}, reports/agents (legacy), reports/types, reports/data, reports/export (xlsx/pdf)
+- 6 páginas completas: Dashboard, Tempo Real, Gravações, Relatórios, Filas, Agentes
+- **Dashboard — análise de abandonos** com 3 abas (Hora/Dia/Semana) + breakdown por tipo:
+  - `agent_loss` (perda de agente / missed)
+  - `queue_abandon` (cliente desistiu na fila)
+  - Barras empilhadas + visão por fila com barra dupla
+- **Relatórios — 6 tipos**: Performance, Filas, Histórico (CDR), Abandonos, Gravações, Produtividade
+  - Filtros: período (Hoje/7d/30d), agente, fila
+  - Exportação Excel (.xlsx, openpyxl) e PDF (reportlab) com cabeçalho, data geração, tabela estilizada
+- Seed idempotente: 3 users, 4 filas, 8 agentes, 400 chamadas, ~280 gravações
+- CORS fix: axios sem `withCredentials` (Bearer-only) para evitar conflito wildcard+credentials
+- Testing agent: **25/25 backend + 100% frontend**
 
 ## Prioritized Backlog (P0/P1/P2)
 
