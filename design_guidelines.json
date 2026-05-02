@@ -1,0 +1,157 @@
+{
+  "theme": "light",
+  "archetype": "Swiss & High-Contrast",
+  "language": "pt-BR",
+  "design_philosophy": "Color is Function Only. 95% of the UI should be monochrome. Color exists only to guide action. Sharp, dense, and scanable dashboard for high-volume callcenter operations.",
+  "colors": {
+    "background": {
+      "main": "#F8F9FA",
+      "surface": "#FFFFFF",
+      "sidebar": "#09090B",
+      "glass": "rgba(255, 255, 255, 0.8)"
+    },
+    "text": {
+      "primary": "#09090B",
+      "secondary": "#52525B",
+      "tertiary": "#A1A1AA",
+      "inverse": "#FAFAFA"
+    },
+    "brand": {
+      "primary": "#000000",
+      "primary_hover": "#27272A",
+      "accent": "#2563EB"
+    },
+    "status": {
+      "online": "#16A34A",
+      "offline": "#DC2626",
+      "paused": "#D97706",
+      "ringing": "#2563EB",
+      "incall": "#9333EA",
+      "missed": "#EF4444"
+    },
+    "border": {
+      "default": "#E4E4E7",
+      "focus": "#18181B"
+    }
+  },
+  "typography": {
+    "headings": {
+      "family": "Cabinet Grotesk, sans-serif",
+      "weights": ["500", "700", "800"],
+      "tracking": "tracking-tight"
+    },
+    "body": {
+      "family": "Inter, sans-serif",
+      "weights": ["400", "500"]
+    },
+    "mono": {
+      "family": "JetBrains Mono, monospace",
+      "weights": ["400"],
+      "usage": "Timers, caller IDs, precise data"
+    },
+    "sizes": {
+      "h1": "text-3xl sm:text-4xl",
+      "h2": "text-2xl sm:text-3xl",
+      "h3": "text-xl",
+      "h4": "text-lg",
+      "body": "text-sm",
+      "caption": "text-xs uppercase tracking-widest",
+      "kpi_value": "text-4xl sm:text-5xl tracking-tighter font-medium"
+    }
+  },
+  "spacing_and_layout": {
+    "dashboard_grid": "grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-4",
+    "kpi_cards": "col-span-1",
+    "main_chart": "col-span-2 lg:col-span-3",
+    "feed_list": "col-span-1 row-span-2",
+    "card_padding": "p-5",
+    "border_radius": "rounded-none md:rounded-sm",
+    "shadows": {
+      "card": "shadow-sm",
+      "hover": "shadow-md transition-shadow duration-200"
+    }
+  },
+  "components": {
+    "sidebar": {
+      "style": "solid dark background (#09090B), light text, strict vertical hierarchy",
+      "active_state": "bg-white/10 text-white border-l-2 border-white",
+      "items": [
+        { "label": "Dashboard", "icon": "SquaresFour", "route": "/" },
+        { "label": "Chamadas em Tempo Real", "icon": "PhoneCall", "route": "/realtime" },
+        { "label": "Gravações", "icon": "CassetteTape", "route": "/recordings" },
+        { "label": "Relatórios de Agentes", "icon": "ChartBar", "route": "/reports" },
+        { "label": "Filas (Queues)", "icon": "UsersThree", "route": "/queues" },
+        { "label": "Gerenciamento", "icon": "Gear", "route": "/management" }
+      ]
+    },
+    "kpi_cards": {
+      "style": "Flat background, 1px solid border-border, no heavy drop shadow. Numeric values in JetBrains Mono.",
+      "layout": "Flex column, label on top (text-xs uppercase text-secondary), big value below, trend indicator on right."
+    },
+    "tables": {
+      "style": "Dense padding (py-2 px-3), 1px bottom border per row. Hover state applies bg-zinc-50.",
+      "headers": "text-xs font-medium text-secondary uppercase bg-zinc-50 border-y border-zinc-200",
+      "actions": "Icons aligned to the right (Play, Download, View Profile)"
+    },
+    "audio_player": {
+      "style": "Sticky bottom bar or inline row expansion. Minimalist waveform visualization.",
+      "controls": "Play/Pause, Timeline slider, Speed multiplier (1x, 1.5x, 2x), Download button."
+    },
+    "badges": {
+      "style": "Subtle background, solid text, no borders. px-2 py-0.5 rounded-full text-xs font-medium",
+      "online": "bg-green-100 text-green-700",
+      "offline": "bg-red-100 text-red-700",
+      "incall": "bg-purple-100 text-purple-700"
+    }
+  },
+  "motion": {
+    "hover": "transition-colors duration-150 ease-in-out",
+    "lists": "Staggered fade-up for table rows on initial load",
+    "realtime": "Pulse animation (ring) on 'ringing' status dots"
+  },
+  "assets": {
+    "icons": {
+      "library": "@phosphor-icons/react",
+      "weight": "regular"
+    },
+    "images": {
+      "logo": {
+        "url": "https://static.prod-images.emergentagent.com/jobs/5fdeedc5-c4ee-4a08-89b4-1593b313b672/images/7f3ac9f82501382925993e90c6835f5cfca8e42601439a36c34f362d963bc18b.png",
+        "description": "Abstract logo for Fusion PBX dashboard",
+        "usage": "Sidebar top header, Login screen"
+      },
+      "agents": [
+        {
+          "url": "https://images.unsplash.com/photo-1770058428276-7ca3d2f98568?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxODF8MHwxfHNlYXJjaHwyfHxjYWxsJTIwY2VudGVyJTIwYWdlbnQlMjBwcm9mZXNzaW9uYWwlMjBwb3J0cmFpdCUyMHdoaXRlJTIwYmFja2dyb3VuZHxlbnwwfHx8fDE3Nzc3NDcwODh8MA&ixlib=rb-4.1.0&q=85",
+          "description": "Agent avatar 1",
+          "usage": "Agent profile, table row avatar"
+        },
+        {
+          "url": "https://images.unsplash.com/photo-1612276529418-52e6ad86ee1d?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxODF8MHwxfHNlYXJjaHw0fHxjYWxsJTIwY2VudGVyJTIwYWdlbnQlMjBwcm9mZXNzaW9uYWwlMjBwb3J0cmFpdCUyMHdoaXRlJTIwYmFja2dyb3VuZHxlbnwwfHx8fDE3Nzc3NDcwODh8MA&ixlib=rb-4.1.0&q=85",
+          "description": "Agent avatar 2",
+          "usage": "Agent profile, table row avatar"
+        },
+        {
+          "url": "https://images.unsplash.com/photo-1712744626457-3ffa4ba32c8c?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxODF8MHwxfHNlYXJjaHwxfHxjYWxsJTIwY2VudGVyJTIwYWdlbnQlMjBwcm9mZXNzaW9uYWwlMjBwb3J0cmFpdCUyMHdoaXRlJTIwYmFja2dyb3VuZHxlbnwwfHx8fDE3Nzc3NDcwODh8MA&ixlib=rb-4.1.0&q=85",
+          "description": "Agent avatar 3",
+          "usage": "Agent profile, table row avatar"
+        },
+        {
+          "url": "https://images.unsplash.com/photo-1685688739798-bce206ab6b42?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxODF8MHwxfHNlYXJjaHwzfHxjYWxsJTIwY2VudGVyJTIwYWdlbnQlMjBwcm9mZXNzaW9uYWwlMjBwb3J0cmFpdCUyMHdoaXRlJTIwYmFja2dyb3VuZHxlbnwwfHx8fDE3Nzc3NDcwODh8MA&ixlib=rb-4.1.0&q=85",
+          "description": "Agent avatar 4",
+          "usage": "Agent profile, table row avatar"
+        }
+      ]
+    }
+  },
+  "instructions_to_main_agent": [
+    "Install and use @phosphor-icons/react for all iconography to maintain a professional, consistent weight.",
+    "Implement the UI in pt-BR language as requested.",
+    "Ensure all data tables (Recordings, Agents) use Shadcn UI with strict borders and dense padding, matching the 'Control Room' grid philosophy.",
+    "KPI values MUST use a monospace font (JetBrains Mono or similar) for readability of telemetry data.",
+    "Add data-testid attributes to all interactive elements for testing.",
+    "Avoid generic purple/teal gradients. Stick to strict grayscale with semantic colors (red/green/blue) indicating system/agent states.",
+    "For the Recordings view, implement an inline or bottom-docked audio player for playback.",
+    "Use standard grid patterns for the Dashboard: primary metrics at the top (col-span-1), charts taking wider spaces, and list of online agents on the side (col-span-1 row-span-2)."
+  ]
+}
