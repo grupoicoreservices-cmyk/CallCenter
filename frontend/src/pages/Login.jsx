@@ -34,8 +34,8 @@ export default function Login() {
             <Headphones size={20} strokeWidth={2.2} />
           </div>
           <div>
-            <div className="font-display font-bold text-xl">FusionCC</div>
-            <div className="text-[11px] text-zinc-400 uppercase tracking-widest">Callcenter Manager</div>
+            <div className="font-display font-bold text-xl">Voxyra CCA</div>
+            <div className="text-[11px] text-zinc-400 uppercase tracking-widest">Callcenter Analytical</div>
           </div>
         </div>
         <div>
@@ -43,7 +43,7 @@ export default function Login() {
             Controle total do seu callcenter.
           </h2>
           <p className="text-zinc-400 mt-4 text-sm max-w-sm">
-            Monitore chamadas em tempo real, analise gravações e acompanhe a performance dos agentes — tudo em um painel moderno integrado ao Fusion PBX.
+            Analytics avançado do seu callcenter Fusion PBX. Monitore chamadas em tempo real, analise gravações e acompanhe a performance dos agentes — tudo em um painel moderno.
           </p>
           <div className="grid grid-cols-3 gap-4 mt-10 pt-8 border-t border-white/10">
             <div>
@@ -60,7 +60,7 @@ export default function Login() {
             </div>
           </div>
         </div>
-        <div className="text-[11px] text-zinc-500">© {new Date().getFullYear()} FusionCC</div>
+        <div className="text-[11px] text-zinc-500">© {new Date().getFullYear()} Voxyra CCA</div>
       </div>
 
       {/* Right form */}

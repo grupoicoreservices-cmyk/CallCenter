@@ -1,4 +1,4 @@
-# FusionCC — Callcenter Manager (PRD)
+# Voxyra CCA — Callcenter Analytical (PRD)
 
 ## Problem Statement (original)
 > Utilizo fusion PBX e gostaria de criar uma frontend para gerenciar o callcenter com opção de ver gravação e analisar agentes.

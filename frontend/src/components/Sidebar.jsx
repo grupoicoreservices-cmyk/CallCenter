@@ -30,8 +30,8 @@ export default function Sidebar() {
             <Headphones size={16} strokeWidth={2.4} />
           </div>
           <div>
-            <div className="font-display font-bold text-[15px] leading-none">FusionCC</div>
-            <div className="text-[10px] text-zinc-400 uppercase tracking-widest mt-1">Callcenter</div>
+            <div className="font-display font-bold text-[15px] leading-none">Voxyra CCA</div>
+            <div className="text-[10px] text-zinc-400 uppercase tracking-widest mt-1">Callcenter Analytical</div>
           </div>
         </div>
       </div>

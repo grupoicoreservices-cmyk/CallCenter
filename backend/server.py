@@ -22,7 +22,7 @@ mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-app = FastAPI(title="CallCenter PBX Manager")
+app = FastAPI(title="Voxyra CCA - Callcenter Analytical")
 api = APIRouter(prefix="/api")
 
 # ---------- Auth helpers ----------
