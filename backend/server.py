@@ -223,14 +223,21 @@ async def seed_data():
         agents = await db.agents.find({}, {"_id": 0}).to_list(100)
         queues = await db.queues.find({}, {"_id": 0}).to_list(100)
         calls, recs = [], []
-        for _ in range(80):
+        for _ in range(400):
             ag = random.choice(agents)
             q = random.choice(queues)
             started = datetime.now(timezone.utc) - timedelta(
-                days=random.randint(0, 14), hours=random.randint(0, 23), minutes=random.randint(0, 59)
+                days=random.randint(0, 27), hours=random.randint(0, 23), minutes=random.randint(0, 59)
             )
             duration = random.randint(30, 900)
             disp = random.choices(DISPOSITIONS, weights=[70, 15, 10, 5])[0]
+            # abandonment_type: "agent_loss" (agente não atendeu - missed)
+            #                   "queue_abandon" (cliente desistiu na fila - abandoned)
+            abandonment_type = None
+            if disp == "missed":
+                abandonment_type = "agent_loss"
+            elif disp == "abandoned":
+                abandonment_type = "queue_abandon"
             cid = str(uuid.uuid4())
             calls.append({
                 "id": cid,
@@ -240,6 +247,8 @@ async def seed_data():
                 "caller_number": f"+55 11 9{random.randint(1000,9999)}-{random.randint(1000,9999)}",
                 "callee_number": ag["extension"],
                 "disposition": disp,
+                "abandonment_type": abandonment_type,
+                "wait_sec": random.randint(5, 120) if disp in ("missed", "abandoned") else random.randint(0, 30),
                 "duration_sec": duration if disp == "answered" else random.randint(5, 40),
                 "started_at": started.isoformat(),
                 "ended_at": (started + timedelta(seconds=duration)).isoformat(),
@@ -302,6 +311,103 @@ async def dashboard_stats(user: dict = Depends(get_current_user)):
         "avg_wait_sec": avg_wait,
         "hourly": hourly,
     }
+
+@api.get("/dashboard/abandoned")
+async def dashboard_abandoned(user: dict = Depends(get_current_user)):
+    """Chamadas abandonadas agrupadas por hora (24h), dia (7d) e semana (4 semanas).
+    Tipos: agent_loss (perda de agente / missed) vs queue_abandon (cliente desistiu)."""
+    now = datetime.now(timezone.utc)
+
+    # Buckets
+    hour_buckets = {h: {"label": f"{h:02d}h", "agent_loss": 0, "queue_abandon": 0} for h in range(24)}
+    day_buckets = []
+    for i in range(6, -1, -1):
+        d = (now - timedelta(days=i)).replace(hour=0, minute=0, second=0, microsecond=0)
+        day_buckets.append({
+            "key": d.isoformat(),
+            "label": d.strftime("%a %d/%m"),
+            "agent_loss": 0, "queue_abandon": 0,
+        })
+    week_buckets = []
+    for i in range(3, -1, -1):
+        # ISO week starting Monday
+        day = now - timedelta(days=now.weekday() + 7 * i)
+        day = day.replace(hour=0, minute=0, second=0, microsecond=0)
+        week_buckets.append({
+            "key": day.isoformat(),
+            "label": f"Sem {day.strftime('%d/%m')}",
+            "agent_loss": 0, "queue_abandon": 0,
+        })
+
+    cutoff_hour = (now - timedelta(hours=23)).isoformat()
+    cutoff_day = (now - timedelta(days=6)).replace(hour=0, minute=0, second=0, microsecond=0)
+    cutoff_week = (now - timedelta(days=now.weekday() + 7 * 3)).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    earliest = min(cutoff_week, datetime.fromisoformat(cutoff_hour))
+    cursor = db.calls.find(
+        {
+            "disposition": {"$in": ["missed", "abandoned"]},
+            "started_at": {"$gte": earliest.isoformat()},
+        },
+        {"_id": 0, "started_at": 1, "abandonment_type": 1, "queue_name": 1},
+    )
+
+    total_hour = {"agent_loss": 0, "queue_abandon": 0}
+    total_day = {"agent_loss": 0, "queue_abandon": 0}
+    total_week = {"agent_loss": 0, "queue_abandon": 0}
+    by_queue = {}
+
+    async for c in cursor:
+        try:
+            dt = datetime.fromisoformat(c["started_at"])
+        except Exception:
+            continue
+        at = c.get("abandonment_type")
+        if at not in ("agent_loss", "queue_abandon"):
+            continue
+
+        # Last 24h bucket
+        if dt.isoformat() >= cutoff_hour:
+            hour_buckets[dt.hour][at] += 1
+            total_hour[at] += 1
+
+        # Last 7 days
+        day_key = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        if day_key >= cutoff_day:
+            for b in day_buckets:
+                if b["key"] == day_key.isoformat():
+                    b[at] += 1
+                    total_day[at] += 1
+                    break
+
+        # Last 4 weeks (by ISO week monday)
+        week_start = (dt - timedelta(days=dt.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+        if week_start >= cutoff_week:
+            for b in week_buckets:
+                if b["key"] == week_start.isoformat():
+                    b[at] += 1
+                    total_week[at] += 1
+                    break
+
+        # Breakdown per queue (last 7 days)
+        if day_key >= cutoff_day:
+            qn = c.get("queue_name", "—")
+            if qn not in by_queue:
+                by_queue[qn] = {"queue": qn, "agent_loss": 0, "queue_abandon": 0}
+            by_queue[qn][at] += 1
+
+    return {
+        "by_hour": [hour_buckets[h] for h in range(24)],
+        "by_day": day_buckets,
+        "by_week": week_buckets,
+        "totals": {
+            "last_24h": total_hour,
+            "last_7d": total_day,
+            "last_4w": total_week,
+        },
+        "by_queue": sorted(by_queue.values(), key=lambda x: x["agent_loss"] + x["queue_abandon"], reverse=True),
+    }
+
 
 @api.get("/realtime/calls")
 async def realtime_calls(user: dict = Depends(get_current_user)):
@@ -400,10 +506,225 @@ async def update_recording(rec_id: str, body: NoteUpdate, user: dict = Depends(r
         raise HTTPException(status_code=404, detail="Não encontrada")
     return {"ok": True}
 
+# ---------- Reports helpers ----------
+def _period_cutoff(period: str) -> datetime:
+    now = datetime.now(timezone.utc)
+    if period == "today":
+        return now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if period == "7d":
+        return now - timedelta(days=7)
+    if period == "30d":
+        return now - timedelta(days=30)
+    return now - timedelta(days=7)
+
+DISPOSITION_LABELS = {
+    "answered": "Atendida", "missed": "Perdida",
+    "abandoned": "Abandonada", "voicemail": "Correio de Voz",
+}
+DIRECTION_LABELS = {"inbound": "Entrada", "outbound": "Saída"}
+ABANDON_LABELS = {"agent_loss": "Perda de Agente", "queue_abandon": "Cliente na Fila"}
+
+async def _build_report(report_type: str, period: str, agent_id: Optional[str], queue_id: Optional[str]):
+    """Return { title, columns: [{key,label}], rows: [...] }"""
+    cutoff = _period_cutoff(period).isoformat()
+
+    if report_type == "agents":
+        agents = await db.agents.find({}, {"_id": 0}).to_list(500)
+        if agent_id:
+            agents = [a for a in agents if a["id"] == agent_id]
+        rows = []
+        for a in agents:
+            q = {"agent_id": a["id"], "started_at": {"$gte": cutoff}}
+            answered = await db.calls.count_documents({**q, "disposition": "answered"})
+            missed = await db.calls.count_documents({**q, "disposition": {"$in": ["missed", "abandoned"]}})
+            rows.append({
+                "agent_name": a["name"],
+                "extension": a["extension"],
+                "status": a.get("status"),
+                "answered": answered,
+                "missed": missed,
+                "avg_handle_sec": a.get("avg_handle_sec", 0),
+                "csat": a.get("csat", 0),
+                "adherence_pct": a.get("adherence_pct", 0),
+            })
+        rows.sort(key=lambda r: r["answered"], reverse=True)
+        return {
+            "title": "Performance de Agentes",
+            "columns": [
+                {"key": "agent_name", "label": "Agente"},
+                {"key": "extension", "label": "Ramal"},
+                {"key": "status", "label": "Status"},
+                {"key": "answered", "label": "Atendidas"},
+                {"key": "missed", "label": "Perdidas"},
+                {"key": "avg_handle_sec", "label": "TMA (s)"},
+                {"key": "csat", "label": "CSAT"},
+                {"key": "adherence_pct", "label": "Aderência %"},
+            ],
+            "rows": rows,
+        }
+
+    if report_type == "queues":
+        queues = await db.queues.find({}, {"_id": 0}).to_list(500)
+        if queue_id:
+            queues = [q for q in queues if q["id"] == queue_id]
+        rows = []
+        for q in queues:
+            filt = {"queue_id": q["id"], "started_at": {"$gte": cutoff}}
+            answered = await db.calls.count_documents({**filt, "disposition": "answered"})
+            missed = await db.calls.count_documents({**filt, "disposition": {"$in": ["missed", "abandoned"]}})
+            total = answered + missed
+            rows.append({
+                "queue_name": q["name"],
+                "extension": q["extension"],
+                "strategy": q["strategy"],
+                "answered": answered,
+                "missed": missed,
+                "total": total,
+                "sla_pct": round((answered / total) * 100, 1) if total else 0.0,
+                "avg_wait_sec": q.get("avg_wait_sec", 0),
+            })
+        rows.sort(key=lambda r: r["total"], reverse=True)
+        return {
+            "title": "Chamadas por Fila",
+            "columns": [
+                {"key": "queue_name", "label": "Fila"},
+                {"key": "extension", "label": "Ext."},
+                {"key": "strategy", "label": "Estratégia"},
+                {"key": "answered", "label": "Atendidas"},
+                {"key": "missed", "label": "Perdidas"},
+                {"key": "total", "label": "Total"},
+                {"key": "sla_pct", "label": "SLA %"},
+                {"key": "avg_wait_sec", "label": "TME (s)"},
+            ],
+            "rows": rows,
+        }
+
+    if report_type == "calls":
+        q = {"started_at": {"$gte": cutoff}}
+        if agent_id: q["agent_id"] = agent_id
+        if queue_id: q["queue_id"] = queue_id
+        docs = await db.calls.find(q, {"_id": 0}).sort("started_at", -1).to_list(2000)
+        rows = [{
+            "started_at": fmt_br_datetime(d.get("started_at")),
+            "agent_name": d.get("agent_name", "—"),
+            "queue_name": d.get("queue_name", "—"),
+            "direction": DIRECTION_LABELS.get(d.get("direction"), d.get("direction", "—")),
+            "caller_number": d.get("caller_number", "—"),
+            "disposition": DISPOSITION_LABELS.get(d.get("disposition"), d.get("disposition", "—")),
+            "duration_sec": d.get("duration_sec", 0),
+            "wait_sec": d.get("wait_sec", 0),
+        } for d in docs]
+        return {
+            "title": "Histórico de Chamadas (CDR)",
+            "columns": [
+                {"key": "started_at", "label": "Data/Hora"},
+                {"key": "agent_name", "label": "Agente"},
+                {"key": "queue_name", "label": "Fila"},
+                {"key": "direction", "label": "Direção"},
+                {"key": "caller_number", "label": "Número"},
+                {"key": "disposition", "label": "Status"},
+                {"key": "duration_sec", "label": "Duração (s)"},
+                {"key": "wait_sec", "label": "Espera (s)"},
+            ],
+            "rows": rows,
+        }
+
+    if report_type == "abandoned":
+        q = {"disposition": {"$in": ["missed", "abandoned"]}, "started_at": {"$gte": cutoff}}
+        if agent_id: q["agent_id"] = agent_id
+        if queue_id: q["queue_id"] = queue_id
+        docs = await db.calls.find(q, {"_id": 0}).sort("started_at", -1).to_list(2000)
+        rows = [{
+            "started_at": fmt_br_datetime(d.get("started_at")),
+            "abandonment_type": ABANDON_LABELS.get(d.get("abandonment_type"), "—"),
+            "queue_name": d.get("queue_name", "—"),
+            "agent_name": d.get("agent_name", "—"),
+            "caller_number": d.get("caller_number", "—"),
+            "wait_sec": d.get("wait_sec", 0),
+        } for d in docs]
+        return {
+            "title": "Chamadas Abandonadas",
+            "columns": [
+                {"key": "started_at", "label": "Data/Hora"},
+                {"key": "abandonment_type", "label": "Tipo"},
+                {"key": "queue_name", "label": "Fila"},
+                {"key": "agent_name", "label": "Agente"},
+                {"key": "caller_number", "label": "Número"},
+                {"key": "wait_sec", "label": "Espera (s)"},
+            ],
+            "rows": rows,
+        }
+
+    if report_type == "recordings":
+        q = {"started_at": {"$gte": cutoff}}
+        if agent_id: q["agent_id"] = agent_id
+        if queue_id: q["queue_id"] = queue_id
+        docs = await db.recordings.find(q, {"_id": 0}).sort("started_at", -1).to_list(2000)
+        rows = [{
+            "started_at": fmt_br_datetime(d.get("started_at")),
+            "agent_name": d.get("agent_name", "—"),
+            "queue_name": d.get("queue_name", "—"),
+            "caller_number": d.get("caller_number", "—"),
+            "duration_sec": d.get("duration_sec", 0),
+            "size_mb": d.get("size_mb", 0),
+        } for d in docs]
+        return {
+            "title": "Gravações",
+            "columns": [
+                {"key": "started_at", "label": "Data/Hora"},
+                {"key": "agent_name", "label": "Agente"},
+                {"key": "queue_name", "label": "Fila"},
+                {"key": "caller_number", "label": "Número"},
+                {"key": "duration_sec", "label": "Duração (s)"},
+                {"key": "size_mb", "label": "Tamanho (MB)"},
+            ],
+            "rows": rows,
+        }
+
+    if report_type == "hourly":
+        q = {"started_at": {"$gte": cutoff}}
+        if agent_id: q["agent_id"] = agent_id
+        if queue_id: q["queue_id"] = queue_id
+        docs = await db.calls.find(q, {"_id": 0, "started_at": 1, "disposition": 1}).to_list(5000)
+        buckets = {h: {"hour": f"{h:02d}h", "answered": 0, "missed": 0, "total": 0} for h in range(24)}
+        for d in docs:
+            try:
+                h = datetime.fromisoformat(d["started_at"]).hour
+                buckets[h]["total"] += 1
+                if d["disposition"] == "answered":
+                    buckets[h]["answered"] += 1
+                elif d["disposition"] in ("missed", "abandoned"):
+                    buckets[h]["missed"] += 1
+            except Exception:
+                pass
+        rows = [buckets[h] for h in range(24)]
+        return {
+            "title": "Produtividade Horária",
+            "columns": [
+                {"key": "hour", "label": "Hora"},
+                {"key": "answered", "label": "Atendidas"},
+                {"key": "missed", "label": "Perdidas"},
+                {"key": "total", "label": "Total"},
+            ],
+            "rows": rows,
+        }
+
+    raise HTTPException(status_code=400, detail="Tipo de relatório inválido")
+
+
+def fmt_br_datetime(iso: Optional[str]) -> str:
+    if not iso: return "—"
+    try:
+        d = datetime.fromisoformat(iso)
+        return d.strftime("%d/%m/%Y %H:%M")
+    except Exception:
+        return iso
+
+
 @api.get("/reports/agents")
 async def reports_agents(user: dict = Depends(get_current_user)):
+    """Compat: retorna performance de agentes (usado na aba principal)."""
     agents = await db.agents.find({}, {"_id": 0}).to_list(500)
-    # aggregate last 7 days call counts per agent
     cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
     rows = []
     for a in agents:
@@ -425,6 +746,125 @@ async def reports_agents(user: dict = Depends(get_current_user)):
     rows.sort(key=lambda r: r["answered_7d"], reverse=True)
     return {"rows": rows}
 
+
+@api.get("/reports/types")
+async def reports_types(user: dict = Depends(get_current_user)):
+    return {
+        "types": [
+            {"key": "agents", "label": "Performance de Agentes"},
+            {"key": "queues", "label": "Chamadas por Fila"},
+            {"key": "calls", "label": "Histórico de Chamadas (CDR)"},
+            {"key": "abandoned", "label": "Chamadas Abandonadas"},
+            {"key": "recordings", "label": "Gravações"},
+            {"key": "hourly", "label": "Produtividade Horária"},
+        ]
+    }
+
+
+@api.get("/reports/data")
+async def reports_data(
+    type: str = Query(...),
+    period: str = Query("7d"),
+    agent_id: Optional[str] = Query(None),
+    queue_id: Optional[str] = Query(None),
+    user: dict = Depends(get_current_user),
+):
+    data = await _build_report(type, period, agent_id, queue_id)
+    return data
+
+
+@api.get("/reports/export")
+async def reports_export(
+    type: str = Query(...),
+    format: str = Query("xlsx"),
+    period: str = Query("7d"),
+    agent_id: Optional[str] = Query(None),
+    queue_id: Optional[str] = Query(None),
+    user: dict = Depends(get_current_user),
+):
+    from fastapi.responses import StreamingResponse
+    import io
+
+    data = await _build_report(type, period, agent_id, queue_id)
+    filename_base = f"{type}_{period}_{datetime.now().strftime('%Y%m%d_%H%M')}"
+
+    if format == "xlsx":
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment
+        wb = Workbook()
+        ws = wb.active
+        ws.title = data["title"][:30]
+        ws.append([data["title"]])
+        ws["A1"].font = Font(bold=True, size=14)
+        ws.append([f"Gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M')}  ·  Período: {period}"])
+        ws.append([])
+        headers = [c["label"] for c in data["columns"]]
+        ws.append(headers)
+        header_row = ws.max_row
+        for cell in ws[header_row]:
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = PatternFill("solid", fgColor="09090B")
+            cell.alignment = Alignment(horizontal="left")
+        for row in data["rows"]:
+            ws.append([row.get(c["key"], "") for c in data["columns"]])
+        # auto-width
+        for col in ws.columns:
+            max_len = max((len(str(c.value)) if c.value is not None else 0) for c in col)
+            ws.column_dimensions[col[0].column_letter].width = min(max_len + 2, 40)
+        buf = io.BytesIO()
+        wb.save(buf); buf.seek(0)
+        return StreamingResponse(
+            buf,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{filename_base}.xlsx"'},
+        )
+
+    if format == "pdf":
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.lib import colors
+        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+        buf = io.BytesIO()
+        doc = SimpleDocTemplate(buf, pagesize=landscape(A4), leftMargin=20, rightMargin=20, topMargin=25, bottomMargin=20)
+        styles = getSampleStyleSheet()
+        story = []
+        story.append(Paragraph(f"<b>{data['title']}</b>", styles["Title"]))
+        story.append(Paragraph(
+            f"Gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M')}  ·  Período: {period}",
+            styles["Normal"],
+        ))
+        story.append(Spacer(1, 12))
+        headers = [c["label"] for c in data["columns"]]
+        table_data = [headers]
+        for row in data["rows"]:
+            table_data.append([str(row.get(c["key"], "")) for c in data["columns"]])
+        if len(table_data) == 1:
+            table_data.append(["Sem dados para o período selecionado."] + [""] * (len(headers) - 1))
+        tbl = Table(table_data, repeatRows=1)
+        tbl.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#09090B")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#FAFAFA")]),
+            ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#E4E4E7")),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 5),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]))
+        story.append(tbl)
+        doc.build(story)
+        buf.seek(0)
+        return StreamingResponse(
+            buf,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{filename_base}.pdf"'},
+        )
+
+    raise HTTPException(status_code=400, detail="Formato inválido. Use xlsx ou pdf.")
+
 # ---------- Startup ----------
 @app.on_event("startup")
 async def on_startup():
@@ -445,7 +885,7 @@ app.include_router(api)
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_origin_regex=".*",
     allow_methods=["*"],
     allow_headers=["*"],
 )

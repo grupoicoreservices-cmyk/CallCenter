@@ -1,0 +1,52 @@
+{
+  "summary": "Iter-2 testing of FusionCC: dashboard abandoned analytics + multi-type Reports w/ XLSX+PDF export. Backend 25/25 pytest passed. Frontend end-to-end flow (login -> dashboard abandoned tabs -> reports 6 tabs -> XLSX & PDF download) all working.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Dashboard / Reports charts", "issues": ["Recharts logs many 'width(-1) and height(-1) of chart' console warnings during initial render. Charts render fine afterwards but warning noise indicates ResponsiveContainer mounts before parent has dimensions. Consider setting explicit height or aspect prop, or wrapping in a sized div."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_callcenter_api.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "(Low) Silence Recharts width=-1/height=-1 warnings by giving ResponsiveContainer parent a deterministic height or use aspect prop.",
+    "(Low) Login redirects to '/' instead of '/dashboard' after success. Works because '/' renders dashboard, but if a /dashboard route exists, redirecting there would be cleaner and matches the app structure described in the spec."
+  ],
+  "critical_code_review_comments": [
+    "CORS uses allow_origin_regex='.*' with allow_credentials=True. Starlette handles this by echoing the request Origin (verified: preflight returns explicit origin, not '*'), so no wildcard+credentials conflict. OK for preview, but for production consider an explicit allow-list of trusted origins.",
+    "server.py is ~895 lines mixing auth, seed, dashboard, reports, exports. Should be split into routers (auth.py, dashboard.py, reports.py) and a seed.py module per the >700-line guideline.",
+    "_build_report 'agents' & 'queues' issue 2 count_documents per item (N+1 queries). For 8 agents/4 queues it's negligible, but switch to a single $facet aggregation if data grows.",
+    "datetime.fromisoformat is used on stored ISO strings; OK now but storing native datetime in Mongo would be cheaper and avoid try/except per row.",
+    "JWT_SECRET fetched via os.environ['JWT_SECRET'] inside _secret() each call — fine, but caching once at startup avoids repeated env lookups."
+  ],
+  "updated_files": ["/app/backend/tests/test_callcenter_api.py"],
+  "success_rate": {"backend": "100% (25/25)", "frontend": "100% on tested flows (login, dashboard abandoned, reports 6 tabs, xlsx, pdf)"},
+  "test_credentials": "admin@callcenter.com / admin123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "None — relied on existing seed (8 agents, 4 queues, 400 calls, ~280 recordings).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend regression suite at /app/backend/tests/test_callcenter_api.py covers: auth (login/me/protected/CORS preflight), dashboard/stats, dashboard/abandoned (24/7/4 buckets + totals + by_queue), realtime, agents, queues, recordings, reports/agents legacy, reports/types (6 keys), reports/data parametrized over 6 types, invalid type 400, calls filter by agent_id and queue_id, reports/export xlsx (PK signature), pdf (%PDF header), invalid format 400. Run: pytest /app/backend/tests/test_callcenter_api.py -v.",
+  "verified_endpoints": [
+    "POST /api/auth/login (200 + token; 401 on wrong creds)",
+    "GET /api/auth/me",
+    "OPTIONS /api/auth/login (CORS preflight no wildcard+creds conflict)",
+    "GET /api/dashboard/stats",
+    "GET /api/dashboard/abandoned (by_hour=24, by_day=7, by_week=4, totals.last_24h/7d/4w, by_queue)",
+    "GET /api/realtime/calls",
+    "GET /api/agents (8) /api/agents/{id}",
+    "GET /api/queues (4 with agent_count)",
+    "GET /api/recordings",
+    "GET /api/reports/agents (legacy)",
+    "GET /api/reports/types (6 types)",
+    "GET /api/reports/data?type={agents|queues|calls|abandoned|recordings|hourly}",
+    "GET /api/reports/data with agent_id and queue_id filters (calls)",
+    "GET /api/reports/data?type=bogus -> 400",
+    "GET /api/reports/export?format=xlsx -> PK zip",
+    "GET /api/reports/export?format=pdf -> %PDF",
+    "GET /api/reports/export?format=csv -> 400"
+  ]
+}
