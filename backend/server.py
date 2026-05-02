@@ -127,6 +127,11 @@ async def login(body: LoginReq, response: Response):
         raise HTTPException(status_code=403, detail="Usuário desativado")
     token = create_access_token(user["id"], user["email"], user["role"])
     _set_auth_cookie(response, token)
+    # Audit login (best-effort, don't block on failure)
+    try:
+        await write_audit(user, "login", "user", user["id"], f"{user.get('name')} <{user.get('email')}>")
+    except Exception:
+        pass
     return {
         "id": user["id"], "email": user["email"], "name": user["name"],
         "role": user["role"], "permissions": effective_permissions(user), "token": token,
@@ -201,6 +206,7 @@ class UserCreate(BaseModel):
     role: str = "agent"
     permissions: Optional[List[str]] = None
     active: bool = True
+    agent_id: Optional[str] = None
 
 class UserUpdate(BaseModel):
     name: Optional[str] = None
@@ -208,6 +214,7 @@ class UserUpdate(BaseModel):
     password: Optional[str] = None
     permissions: Optional[List[str]] = None
     active: Optional[bool] = None
+    agent_id: Optional[str] = None
 
 def _serialize_user(u: dict) -> dict:
     return {
@@ -218,8 +225,24 @@ def _serialize_user(u: dict) -> dict:
         "permissions": u.get("permissions") or DEFAULT_PERMISSIONS_BY_ROLE.get(u.get("role", "agent"), []),
         "is_custom_permissions": u.get("permissions") is not None,
         "active": u.get("active", True),
+        "agent_id": u.get("agent_id"),
         "created_at": u.get("created_at"),
     }
+
+async def write_audit(actor: dict, action: str, target_type: str, target_id: str, target_label: str, changes: Optional[dict] = None):
+    doc = {
+        "id": str(uuid.uuid4()),
+        "action": action,           # "create" | "update" | "delete" | "login" etc
+        "target_type": target_type, # "user"
+        "target_id": target_id,
+        "target_label": target_label,
+        "actor_id": actor.get("id"),
+        "actor_email": actor.get("email"),
+        "actor_name": actor.get("name"),
+        "changes": changes or {},
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.audit_logs.insert_one(doc)
 
 @api.get("/permissions")
 async def list_permissions(user: dict = Depends(require_permission("users.manage"))):
@@ -253,11 +276,17 @@ async def create_user(body: UserCreate, user: dict = Depends(require_permission(
     doc = {
         "id": uid, "email": email, "name": body.name, "role": body.role,
         "password_hash": hash_password(body.password),
-        "permissions": body.permissions,  # None => use role default
+        "permissions": body.permissions,
         "active": body.active,
+        "agent_id": body.agent_id,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     await db.users.insert_one(doc)
+    await write_audit(user, "create", "user", uid, f"{body.name} <{email}>", {
+        "role": body.role, "active": body.active,
+        "permissions_mode": "custom" if body.permissions is not None else "default",
+        "agent_id": body.agent_id,
+    })
     return _serialize_user(doc)
 
 @api.patch("/users/{user_id}")
@@ -266,21 +295,29 @@ async def update_user(user_id: str, body: UserUpdate, user: dict = Depends(requi
     if not target:
         raise HTTPException(status_code=404, detail="Usuário não encontrado")
     update = {}
-    if body.name is not None: update["name"] = body.name
-    if body.role is not None:
+    changes = {}
+    if body.name is not None and body.name != target.get("name"):
+        update["name"] = body.name; changes["name"] = {"from": target.get("name"), "to": body.name}
+    if body.role is not None and body.role != target.get("role"):
         if body.role not in ("admin", "supervisor", "agent"):
             raise HTTPException(status_code=400, detail="Papel inválido")
-        update["role"] = body.role
+        update["role"] = body.role; changes["role"] = {"from": target.get("role"), "to": body.role}
     if body.password:
         update["password_hash"] = hash_password(body.password)
+        changes["password"] = "changed"
     if body.permissions is not None:
         invalid = [p for p in body.permissions if p not in {x["key"] for x in ALL_PERMISSIONS}]
         if invalid:
             raise HTTPException(status_code=400, detail=f"Permissões inválidas: {invalid}")
         update["permissions"] = body.permissions
-    if body.active is not None: update["active"] = body.active
+        changes["permissions"] = {"count": len(body.permissions), "mode": "custom"}
+    if body.active is not None and body.active != target.get("active", True):
+        update["active"] = body.active; changes["active"] = {"from": target.get("active", True), "to": body.active}
+    if body.agent_id is not None and body.agent_id != target.get("agent_id"):
+        update["agent_id"] = body.agent_id; changes["agent_id"] = {"from": target.get("agent_id"), "to": body.agent_id}
     if update:
         await db.users.update_one({"id": user_id}, {"$set": update})
+        await write_audit(user, "update", "user", user_id, f"{target.get('name')} <{target.get('email')}>", changes)
     fresh = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
     return _serialize_user(fresh)
 
@@ -296,7 +333,23 @@ async def delete_user(user_id: str, user: dict = Depends(require_permission("use
         if admin_count <= 1:
             raise HTTPException(status_code=400, detail="Não é possível remover o último administrador")
     await db.users.delete_one({"id": user_id})
+    await write_audit(user, "delete", "user", user_id, f"{target.get('name')} <{target.get('email')}>", {"role": target.get("role")})
     return {"ok": True}
+
+@api.get("/audit-logs")
+async def list_audit_logs(
+    user: dict = Depends(require_permission("users.manage")),
+    target_type: Optional[str] = Query(None),
+    action: Optional[str] = Query(None),
+    actor_id: Optional[str] = Query(None),
+    limit: int = Query(200, le=1000),
+):
+    q = {}
+    if target_type: q["target_type"] = target_type
+    if action: q["action"] = action
+    if actor_id: q["actor_id"] = actor_id
+    docs = await db.audit_logs.find(q, {"_id": 0}).sort("created_at", -1).to_list(limit)
+    return {"logs": docs}
 
 # ---------- Mock Data Seeding ----------
 AGENT_NAMES = [
@@ -435,7 +488,7 @@ async def seed_data():
 
 # ---------- Dashboard & PBX endpoints ----------
 @api.get("/dashboard/stats")
-async def dashboard_stats(user: dict = Depends(get_current_user)):
+async def dashboard_stats(user: dict = Depends(require_permission("dashboard.view"))):
     total_agents = await db.agents.count_documents({})
     online_agents = await db.agents.count_documents({"status": {"$in": ["online", "incall", "paused"]}})
     incall = await db.agents.count_documents({"status": "incall"})
@@ -572,7 +625,7 @@ async def dashboard_abandoned(user: dict = Depends(get_current_user)):
 
 
 @api.get("/realtime/calls")
-async def realtime_calls(user: dict = Depends(get_current_user)):
+async def realtime_calls(user: dict = Depends(require_permission("realtime.view"))):
     agents = await db.agents.find({"status": "incall"}, {"_id": 0}).to_list(100)
     # synthesize active calls from incall agents
     queues = {q["id"]: q for q in await db.queues.find({}, {"_id": 0}).to_list(100)}
@@ -609,12 +662,12 @@ async def realtime_calls(user: dict = Depends(get_current_user)):
     return {"calls": active}
 
 @api.get("/agents")
-async def list_agents(user: dict = Depends(get_current_user)):
+async def list_agents(user: dict = Depends(require_permission("agents.view"))):
     items = await db.agents.find({}, {"_id": 0}).to_list(500)
     return {"agents": items}
 
 @api.get("/agents/{agent_id}")
-async def get_agent(agent_id: str, user: dict = Depends(get_current_user)):
+async def get_agent(agent_id: str, user: dict = Depends(require_permission("agents.view"))):
     a = await db.agents.find_one({"id": agent_id}, {"_id": 0})
     if not a:
         raise HTTPException(status_code=404, detail="Agente não encontrado")
@@ -622,7 +675,7 @@ async def get_agent(agent_id: str, user: dict = Depends(get_current_user)):
     return {"agent": a, "recent_calls": recent}
 
 @api.get("/queues")
-async def list_queues(user: dict = Depends(get_current_user)):
+async def list_queues(user: dict = Depends(require_permission("queues.view"))):
     items = await db.queues.find({}, {"_id": 0}).to_list(500)
     # attach agent count per queue
     agents = await db.agents.find({}, {"_id": 0, "queues": 1}).to_list(500)
@@ -638,8 +691,19 @@ async def list_recordings(
     search: Optional[str] = Query(None),
     limit: int = Query(100, le=500),
 ):
+    perms = effective_permissions(user)
+    has_all = "recordings.view_all" in perms
+    has_own = "recordings.view_own" in perms
+    if not (has_all or has_own):
+        raise HTTPException(status_code=403, detail="Sem permissão")
     q = {}
-    if agent_id:
+    if not has_all and has_own:
+        # restrict to user's own agent_id
+        own_id = user.get("agent_id")
+        if not own_id:
+            return {"recordings": []}
+        q["agent_id"] = own_id
+    elif agent_id:
         q["agent_id"] = agent_id
     if queue_id:
         q["queue_id"] = queue_id
@@ -653,16 +717,23 @@ async def list_recordings(
 
 @api.get("/recordings/{rec_id}")
 async def get_recording(rec_id: str, user: dict = Depends(get_current_user)):
+    perms = effective_permissions(user)
+    has_all = "recordings.view_all" in perms
+    has_own = "recordings.view_own" in perms
+    if not (has_all or has_own):
+        raise HTTPException(status_code=403, detail="Sem permissão")
     r = await db.recordings.find_one({"id": rec_id}, {"_id": 0})
     if not r:
         raise HTTPException(status_code=404, detail="Gravação não encontrada")
+    if not has_all and r.get("agent_id") != user.get("agent_id"):
+        raise HTTPException(status_code=403, detail="Sem permissão para esta gravação")
     return r
 
 class NoteUpdate(BaseModel):
     notes: str
 
 @api.patch("/recordings/{rec_id}")
-async def update_recording(rec_id: str, body: NoteUpdate, user: dict = Depends(require_role("admin", "supervisor"))):
+async def update_recording(rec_id: str, body: NoteUpdate, user: dict = Depends(require_permission("recordings.edit_notes"))):
     res = await db.recordings.update_one({"id": rec_id}, {"$set": {"notes": body.notes}})
     if res.matched_count == 0:
         raise HTTPException(status_code=404, detail="Não encontrada")
@@ -884,7 +955,7 @@ def fmt_br_datetime(iso: Optional[str]) -> str:
 
 
 @api.get("/reports/agents")
-async def reports_agents(user: dict = Depends(get_current_user)):
+async def reports_agents(user: dict = Depends(require_permission("reports.view"))):
     """Compat: retorna performance de agentes (usado na aba principal)."""
     agents = await db.agents.find({}, {"_id": 0}).to_list(500)
     cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
@@ -910,7 +981,7 @@ async def reports_agents(user: dict = Depends(get_current_user)):
 
 
 @api.get("/reports/types")
-async def reports_types(user: dict = Depends(get_current_user)):
+async def reports_types(user: dict = Depends(require_permission("reports.view"))):
     return {
         "types": [
             {"key": "agents", "label": "Performance de Agentes"},
@@ -929,7 +1000,7 @@ async def reports_data(
     period: str = Query("7d"),
     agent_id: Optional[str] = Query(None),
     queue_id: Optional[str] = Query(None),
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(require_permission("reports.view")),
 ):
     data = await _build_report(type, period, agent_id, queue_id)
     return data
@@ -942,7 +1013,7 @@ async def reports_export(
     period: str = Query("7d"),
     agent_id: Optional[str] = Query(None),
     queue_id: Optional[str] = Query(None),
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(require_permission("reports.export")),
 ):
     from fastapi.responses import StreamingResponse
     import io
@@ -1035,6 +1106,8 @@ async def on_startup():
     await db.queues.create_index("id", unique=True)
     await db.calls.create_index("started_at")
     await db.recordings.create_index("started_at")
+    await db.audit_logs.create_index("created_at")
+    await db.audit_logs.create_index([("target_type", 1), ("target_id", 1)])
     await seed_data()
 
 @app.on_event("shutdown")

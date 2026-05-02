@@ -30,6 +30,7 @@ export default function Users() {
   const { user: me, hasPermission } = useAuth();
   const [users, setUsers] = useState([]);
   const [permsMeta, setPermsMeta] = useState({ permissions: [], defaults: {}, roles: [] });
+  const [agentEntities, setAgentEntities] = useState([]);
   const [search, setSearch] = useState("");
   const [editing, setEditing] = useState(null); // null | "new" | userObj
   const [confirmDel, setConfirmDel] = useState(null);
@@ -38,9 +39,14 @@ export default function Users() {
   async function load() {
     setLoading(true);
     try {
-      const [u, p] = await Promise.all([api.get("/users"), api.get("/permissions")]);
+      const [u, p, a] = await Promise.all([
+        api.get("/users"),
+        api.get("/permissions"),
+        api.get("/agents").catch(() => ({ data: { agents: [] } })),
+      ]);
       setUsers(u.data.users);
       setPermsMeta(p.data);
+      setAgentEntities(a.data.agents || []);
     } catch (e) {
       toast.error("Falha ao carregar usuários");
     } finally {
@@ -161,6 +167,7 @@ export default function Users() {
         open={editing !== null}
         editing={editing}
         permsMeta={permsMeta}
+        agentEntities={agentEntities}
         onClose={() => setEditing(null)}
         onSaved={() => { setEditing(null); load(); }}
       />
@@ -183,15 +190,16 @@ export default function Users() {
   );
 }
 
-function UserFormDialog({ open, editing, permsMeta, onClose, onSaved }) {
+function UserFormDialog({ open, editing, permsMeta, agentEntities, onClose, onSaved }) {
   const isNew = editing === "new";
   const initial = useMemo(() => {
-    if (isNew || !editing) return { name: "", email: "", password: "", role: "agent", permissions: null, active: true };
+    if (isNew || !editing) return { name: "", email: "", password: "", role: "agent", permissions: null, active: true, agent_id: null };
     return {
       name: editing.name || "", email: editing.email || "", password: "",
       role: editing.role || "agent",
       permissions: editing.is_custom_permissions ? [...editing.permissions] : null,
       active: editing.active !== false,
+      agent_id: editing.agent_id || null,
     };
   }, [editing, isNew]);
   const [form, setForm] = useState(initial);
@@ -242,6 +250,7 @@ function UserFormDialog({ open, editing, permsMeta, onClose, onSaved }) {
         role: form.role,
         active: form.active,
         permissions: form.role === "admin" ? null : (useDefaults ? null : (form.permissions || [])),
+        agent_id: form.role === "agent" ? (form.agent_id || null) : null,
       };
       if (isNew) {
         if (!form.email || !form.password) {
@@ -295,6 +304,22 @@ function UserFormDialog({ open, editing, permsMeta, onClose, onSaved }) {
             </Select>
           </div>
         </div>
+
+        {form.role === "agent" && (
+          <div className="border-t border-border pt-4 mt-2">
+            <Label className="text-xs mb-1.5 block">
+              Vincular a um agente do callcenter
+              <span className="text-muted-foreground ml-1 font-normal normal-case">(define quais gravações o usuário verá)</span>
+            </Label>
+            <Select value={form.agent_id || "none"} onValueChange={(v) => setForm({ ...form, agent_id: v === "none" ? null : v })}>
+              <SelectTrigger data-testid="uf-agent-id"><SelectValue placeholder="Nenhum vínculo" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="none">— Sem vínculo (não verá gravações) —</SelectItem>
+                {agentEntities.map((a) => <SelectItem key={a.id} value={a.id}>{a.name} · ext. {a.extension}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          </div>
+        )}
 
         <div className="flex items-center justify-between border-t border-border pt-4 mt-2">
           <label className="flex items-center gap-2 text-sm cursor-pointer">
