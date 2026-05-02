@@ -43,7 +43,7 @@ export default function Login() {
             Controle total do seu callcenter.
           </h2>
           <p className="text-zinc-400 mt-4 text-sm max-w-sm">
-            Analytics avançado do seu callcenter Fusion PBX. Monitore chamadas em tempo real, analise gravações e acompanhe a performance dos agentes — tudo em um painel moderno.
+            Analytics avançado do seu callcenter. Monitore chamadas em tempo real, analise gravações e acompanhe a performance dos agentes — tudo em um painel moderno.
           </p>
           <div className="grid grid-cols-3 gap-4 mt-10 pt-8 border-t border-white/10">
             <div>
