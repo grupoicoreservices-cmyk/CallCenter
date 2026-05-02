@@ -123,9 +123,14 @@ async def login(body: LoginReq, response: Response):
     user = await db.users.find_one({"email": email})
     if not user or not verify_password(body.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Credenciais inválidas")
+    if user.get("active") is False:
+        raise HTTPException(status_code=403, detail="Usuário desativado")
     token = create_access_token(user["id"], user["email"], user["role"])
     _set_auth_cookie(response, token)
-    return {"id": user["id"], "email": user["email"], "name": user["name"], "role": user["role"], "token": token}
+    return {
+        "id": user["id"], "email": user["email"], "name": user["name"],
+        "role": user["role"], "permissions": effective_permissions(user), "token": token,
+    }
 
 @api.post("/auth/logout")
 async def logout(response: Response):
@@ -134,7 +139,164 @@ async def logout(response: Response):
 
 @api.get("/auth/me")
 async def me(user: dict = Depends(get_current_user)):
+    # Inject effective permissions
+    user["permissions"] = effective_permissions(user)
     return user
+
+# ---------- Permissions ----------
+ALL_PERMISSIONS = [
+    {"key": "dashboard.view",       "label": "Ver Dashboard",                 "group": "Dashboard"},
+    {"key": "realtime.view",        "label": "Ver Chamadas em Tempo Real",    "group": "Operação"},
+    {"key": "tv.view",              "label": "Acessar Painel TV",             "group": "Operação"},
+    {"key": "recordings.view_own",  "label": "Ouvir suas próprias gravações", "group": "Gravações"},
+    {"key": "recordings.view_all",  "label": "Ouvir gravações de toda equipe","group": "Gravações"},
+    {"key": "recordings.download",  "label": "Baixar gravações",              "group": "Gravações"},
+    {"key": "recordings.edit_notes","label": "Adicionar anotações em gravações","group": "Gravações"},
+    {"key": "reports.view",         "label": "Ver relatórios",                "group": "Relatórios"},
+    {"key": "reports.export",       "label": "Exportar relatórios (Excel/PDF)","group": "Relatórios"},
+    {"key": "queues.view",          "label": "Ver filas",                     "group": "Filas"},
+    {"key": "queues.edit",          "label": "Editar filas",                  "group": "Filas"},
+    {"key": "agents.view",          "label": "Ver agentes",                   "group": "Agentes"},
+    {"key": "agents.edit",          "label": "Editar agentes",                "group": "Agentes"},
+    {"key": "users.manage",         "label": "Gerenciar usuários",            "group": "Administração"},
+]
+
+DEFAULT_PERMISSIONS_BY_ROLE = {
+    "admin": [p["key"] for p in ALL_PERMISSIONS],
+    "supervisor": [
+        "dashboard.view", "realtime.view", "tv.view",
+        "recordings.view_all", "recordings.download", "recordings.edit_notes",
+        "reports.view", "reports.export",
+        "queues.view", "queues.edit",
+        "agents.view", "agents.edit",
+    ],
+    "agent": [
+        "dashboard.view",
+        "recordings.view_own",
+        "reports.view",
+    ],
+}
+
+def effective_permissions(user: dict) -> List[str]:
+    """Custom permissions if set, otherwise role defaults. Admin always has full access."""
+    if user.get("role") == "admin":
+        return DEFAULT_PERMISSIONS_BY_ROLE["admin"]
+    perms = user.get("permissions")
+    if perms is None:
+        return DEFAULT_PERMISSIONS_BY_ROLE.get(user.get("role", "agent"), [])
+    return perms
+
+def require_permission(perm: str):
+    async def checker(user: dict = Depends(get_current_user)):
+        if perm not in effective_permissions(user):
+            raise HTTPException(status_code=403, detail="Sem permissão")
+        return user
+    return checker
+
+# ---------- User Management (admin only) ----------
+class UserCreate(BaseModel):
+    email: EmailStr
+    password: str
+    name: str
+    role: str = "agent"
+    permissions: Optional[List[str]] = None
+    active: bool = True
+
+class UserUpdate(BaseModel):
+    name: Optional[str] = None
+    role: Optional[str] = None
+    password: Optional[str] = None
+    permissions: Optional[List[str]] = None
+    active: Optional[bool] = None
+
+def _serialize_user(u: dict) -> dict:
+    return {
+        "id": u["id"],
+        "email": u["email"],
+        "name": u.get("name", ""),
+        "role": u.get("role", "agent"),
+        "permissions": u.get("permissions") or DEFAULT_PERMISSIONS_BY_ROLE.get(u.get("role", "agent"), []),
+        "is_custom_permissions": u.get("permissions") is not None,
+        "active": u.get("active", True),
+        "created_at": u.get("created_at"),
+    }
+
+@api.get("/permissions")
+async def list_permissions(user: dict = Depends(require_permission("users.manage"))):
+    return {
+        "permissions": ALL_PERMISSIONS,
+        "defaults": DEFAULT_PERMISSIONS_BY_ROLE,
+        "roles": [
+            {"key": "admin", "label": "Administrador"},
+            {"key": "supervisor", "label": "Supervisor"},
+            {"key": "agent", "label": "Agente"},
+        ],
+    }
+
+@api.get("/users")
+async def list_users(user: dict = Depends(require_permission("users.manage"))):
+    docs = await db.users.find({}, {"_id": 0, "password_hash": 0}).sort("created_at", 1).to_list(500)
+    return {"users": [_serialize_user(u) for u in docs]}
+
+@api.post("/users")
+async def create_user(body: UserCreate, user: dict = Depends(require_permission("users.manage"))):
+    if body.role not in ("admin", "supervisor", "agent"):
+        raise HTTPException(status_code=400, detail="Papel inválido")
+    email = body.email.lower()
+    if await db.users.find_one({"email": email}):
+        raise HTTPException(status_code=400, detail="Email já cadastrado")
+    if body.permissions is not None:
+        invalid = [p for p in body.permissions if p not in {x["key"] for x in ALL_PERMISSIONS}]
+        if invalid:
+            raise HTTPException(status_code=400, detail=f"Permissões inválidas: {invalid}")
+    uid = str(uuid.uuid4())
+    doc = {
+        "id": uid, "email": email, "name": body.name, "role": body.role,
+        "password_hash": hash_password(body.password),
+        "permissions": body.permissions,  # None => use role default
+        "active": body.active,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.users.insert_one(doc)
+    return _serialize_user(doc)
+
+@api.patch("/users/{user_id}")
+async def update_user(user_id: str, body: UserUpdate, user: dict = Depends(require_permission("users.manage"))):
+    target = await db.users.find_one({"id": user_id})
+    if not target:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado")
+    update = {}
+    if body.name is not None: update["name"] = body.name
+    if body.role is not None:
+        if body.role not in ("admin", "supervisor", "agent"):
+            raise HTTPException(status_code=400, detail="Papel inválido")
+        update["role"] = body.role
+    if body.password:
+        update["password_hash"] = hash_password(body.password)
+    if body.permissions is not None:
+        invalid = [p for p in body.permissions if p not in {x["key"] for x in ALL_PERMISSIONS}]
+        if invalid:
+            raise HTTPException(status_code=400, detail=f"Permissões inválidas: {invalid}")
+        update["permissions"] = body.permissions
+    if body.active is not None: update["active"] = body.active
+    if update:
+        await db.users.update_one({"id": user_id}, {"$set": update})
+    fresh = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
+    return _serialize_user(fresh)
+
+@api.delete("/users/{user_id}")
+async def delete_user(user_id: str, user: dict = Depends(require_permission("users.manage"))):
+    if user["id"] == user_id:
+        raise HTTPException(status_code=400, detail="Você não pode excluir a si mesmo")
+    target = await db.users.find_one({"id": user_id})
+    if not target:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado")
+    if target.get("role") == "admin":
+        admin_count = await db.users.count_documents({"role": "admin"})
+        if admin_count <= 1:
+            raise HTTPException(status_code=400, detail="Não é possível remover o último administrador")
+    await db.users.delete_one({"id": user_id})
+    return {"ok": True}
 
 # ---------- Mock Data Seeding ----------
 AGENT_NAMES = [

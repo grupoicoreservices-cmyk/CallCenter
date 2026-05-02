@@ -1,22 +1,25 @@
 import { NavLink, useNavigate } from "react-router-dom";
 import {
-  LayoutDashboard, PhoneCall, Disc3, BarChart3, Users, UserCog, LogOut, Headphones, Tv2,
+  LayoutDashboard, PhoneCall, Disc3, BarChart3, Users, UserCog, LogOut, Headphones, Tv2, ShieldCheck,
 } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
 
 const ITEMS = [
-  { to: "/", label: "Dashboard", icon: LayoutDashboard, testid: "nav-dashboard" },
-  { to: "/realtime", label: "Tempo Real", icon: PhoneCall, testid: "nav-realtime" },
-  { to: "/recordings", label: "Gravações", icon: Disc3, testid: "nav-recordings" },
-  { to: "/reports", label: "Relatórios", icon: BarChart3, testid: "nav-reports" },
-  { to: "/queues", label: "Filas", icon: Users, testid: "nav-queues" },
-  { to: "/agents", label: "Agentes", icon: UserCog, testid: "nav-agents" },
-  { to: "/tv", label: "Painel TV", icon: Tv2, testid: "nav-tv" },
+  { to: "/", label: "Dashboard", icon: LayoutDashboard, testid: "nav-dashboard", perm: "dashboard.view" },
+  { to: "/realtime", label: "Tempo Real", icon: PhoneCall, testid: "nav-realtime", perm: "realtime.view" },
+  { to: "/recordings", label: "Gravações", icon: Disc3, testid: "nav-recordings", perm: "recordings.view_own" },
+  { to: "/reports", label: "Relatórios", icon: BarChart3, testid: "nav-reports", perm: "reports.view" },
+  { to: "/queues", label: "Filas", icon: Users, testid: "nav-queues", perm: "queues.view" },
+  { to: "/agents", label: "Agentes", icon: UserCog, testid: "nav-agents", perm: "agents.view" },
+  { to: "/tv", label: "Painel TV", icon: Tv2, testid: "nav-tv", perm: "tv.view" },
+  { to: "/users", label: "Usuários", icon: ShieldCheck, testid: "nav-users", perm: "users.manage" },
 ];
 
 export default function Sidebar() {
-  const { user, logout } = useAuth();
+  const { user, logout, hasPermission } = useAuth();
   const navigate = useNavigate();
+
+  const visibleItems = ITEMS.filter((it) => !it.perm || hasPermission(it.perm));
 
   const doLogout = async () => {
     await logout();
@@ -38,7 +41,7 @@ export default function Sidebar() {
       </div>
 
       <nav className="flex-1 px-2 py-4 space-y-0.5">
-        {ITEMS.map((it) => (
+        {visibleItems.map((it) => (
           <NavLink
             key={it.to}
             to={it.to}
