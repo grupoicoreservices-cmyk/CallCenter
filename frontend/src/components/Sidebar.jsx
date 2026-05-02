@@ -1,6 +1,6 @@
 import { NavLink, useNavigate } from "react-router-dom";
 import {
-  LayoutDashboard, PhoneCall, Disc3, BarChart3, Users, UserCog, LogOut, Headphones,
+  LayoutDashboard, PhoneCall, Disc3, BarChart3, Users, UserCog, LogOut, Headphones, Tv2,
 } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
 
@@ -11,6 +11,7 @@ const ITEMS = [
   { to: "/reports", label: "Relatórios", icon: BarChart3, testid: "nav-reports" },
   { to: "/queues", label: "Filas", icon: Users, testid: "nav-queues" },
   { to: "/agents", label: "Agentes", icon: UserCog, testid: "nav-agents" },
+  { to: "/tv", label: "Painel TV", icon: Tv2, testid: "nav-tv" },
 ];
 
 export default function Sidebar() {
