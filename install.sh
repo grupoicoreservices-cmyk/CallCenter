@@ -157,7 +157,10 @@ log "Configurando backend Python ($PY_BIN)..."
 cd "$APP_DIR/backend"
 
 sudo -u "$APP_USER" "$PY_BIN" -m venv venv
-sudo -u "$APP_USER" bash -c "source venv/bin/activate && pip install --upgrade pip --quiet && pip install -r requirements.txt --quiet"
+# Remove dependências internas da plataforma Emergent (não existem no PyPI público)
+sudo -u "$APP_USER" grep -vE '^(emergentintegrations)' requirements.txt > /tmp/requirements-public.txt
+sudo -u "$APP_USER" bash -c "source venv/bin/activate && pip install --upgrade pip --quiet && pip install -r /tmp/requirements-public.txt --quiet"
+rm -f /tmp/requirements-public.txt
 
 # .env do backend
 cat > "$APP_DIR/backend/.env" <<EOF
