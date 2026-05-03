@@ -1405,6 +1405,175 @@ async def _resolve_tenant_for_fusion(user: dict, tenant_id: Optional[str]) -> st
     return user["tenant_id"]
 
 
+# ---------- System Updates (Super Admin Self-Host Tool) ----------
+import subprocess
+import asyncio
+
+_UPDATE_STATE: Dict[str, Any] = {"running": False, "log": [], "started_at": None, "finished_at": None, "success": None}
+APP_ROOT = Path("/opt/CallCenter")
+
+
+def _get_git_info() -> Dict[str, Any]:
+    """Returns current git commit, branch, and remote status."""
+    info: Dict[str, Any] = {"installed": False}
+    try:
+        if not (APP_ROOT / ".git").exists():
+            return info
+        info["installed"] = True
+        info["branch"] = subprocess.check_output(
+            ["git", "-C", str(APP_ROOT), "rev-parse", "--abbrev-ref", "HEAD"], text=True, timeout=10
+        ).strip()
+        info["commit"] = subprocess.check_output(
+            ["git", "-C", str(APP_ROOT), "rev-parse", "--short", "HEAD"], text=True, timeout=10
+        ).strip()
+        info["commit_full"] = subprocess.check_output(
+            ["git", "-C", str(APP_ROOT), "rev-parse", "HEAD"], text=True, timeout=10
+        ).strip()
+        info["last_commit_message"] = subprocess.check_output(
+            ["git", "-C", str(APP_ROOT), "log", "-1", "--pretty=%B"], text=True, timeout=10
+        ).strip()
+        info["last_commit_date"] = subprocess.check_output(
+            ["git", "-C", str(APP_ROOT), "log", "-1", "--pretty=%cI"], text=True, timeout=10
+        ).strip()
+        try:
+            subprocess.check_output(
+                ["git", "-C", str(APP_ROOT), "fetch", "--quiet"], text=True, timeout=30,
+                stderr=subprocess.STDOUT,
+            )
+            info["fetch_ok"] = True
+        except Exception as e:
+            info["fetch_ok"] = False
+            info["fetch_error"] = str(e)
+        try:
+            behind = subprocess.check_output(
+                ["git", "-C", str(APP_ROOT), "rev-list", "--count", "HEAD..@{u}"],
+                text=True, timeout=10, stderr=subprocess.DEVNULL,
+            ).strip()
+            info["commits_behind"] = int(behind) if behind else 0
+            info["has_updates"] = info["commits_behind"] > 0
+        except Exception:
+            info["commits_behind"] = 0
+            info["has_updates"] = False
+    except Exception as e:
+        info["error"] = str(e)
+    return info
+
+
+async def _run_update_task():
+    """Background task that runs git pull + pip install + yarn build + supervisor restart."""
+    def append(line: str):
+        _UPDATE_STATE["log"].append({"t": datetime.now(timezone.utc).isoformat(), "line": line})
+        if len(_UPDATE_STATE["log"]) > 1000:
+            _UPDATE_STATE["log"] = _UPDATE_STATE["log"][-500:]
+
+    async def run_cmd(cmd: str, cwd: Optional[str] = None, timeout: int = 600) -> int:
+        append(f"$ {cmd}")
+        proc = await asyncio.create_subprocess_shell(
+            cmd, cwd=cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        )
+        try:
+            while True:
+                line = await asyncio.wait_for(proc.stdout.readline(), timeout=timeout)
+                if not line: break
+                txt = line.decode("utf-8", errors="replace").rstrip()
+                if txt: append(txt)
+        except asyncio.TimeoutError:
+            proc.kill(); append(f"❌ Timeout após {timeout}s"); return 124
+        rc = await proc.wait()
+        append(f"[exit {rc}]")
+        return rc
+
+    _UPDATE_STATE.update({"running": True, "log": [], "started_at": datetime.now(timezone.utc).isoformat(),
+                          "finished_at": None, "success": None})
+    try:
+        append("🚀 Iniciando atualização…")
+        if not (APP_ROOT / ".git").exists():
+            append(f"❌ {APP_ROOT} não é um repositório Git. Clone via git para habilitar updates.")
+            _UPDATE_STATE["success"] = False
+            return
+        # git pull
+        rc = await run_cmd(f"git -C {APP_ROOT} pull", timeout=120)
+        if rc != 0: _UPDATE_STATE["success"] = False; return
+        # pip install
+        rc = await run_cmd(
+            f"bash -c 'cd {APP_ROOT}/backend && source venv/bin/activate && "
+            f"grep -vE \"^(emergentintegrations)\" requirements.txt > /tmp/req.txt && "
+            f"pip install -r /tmp/req.txt --quiet --disable-pip-version-check'",
+            timeout=600,
+        )
+        if rc != 0: _UPDATE_STATE["success"] = False; return
+        # yarn install + build
+        rc = await run_cmd(f"cd {APP_ROOT}/frontend && yarn install --silent && yarn build", timeout=900)
+        if rc != 0: _UPDATE_STATE["success"] = False; return
+        append("")
+        append("✅ Código atualizado com sucesso!")
+        append("🔄 Reiniciando backend via supervisor…")
+        append("   (a página ficará indisponível por ~5 segundos)")
+        _UPDATE_STATE["success"] = True
+        _UPDATE_STATE["finished_at"] = datetime.now(timezone.utc).isoformat()
+        _UPDATE_STATE["running"] = False
+        # Schedule restart after 1s so the HTTP response is delivered
+        await asyncio.sleep(1)
+        await asyncio.create_subprocess_shell("sudo -n supervisorctl restart CallCenter-backend &")
+    except Exception as e:
+        append(f"❌ Erro: {e}")
+        _UPDATE_STATE["success"] = False
+    finally:
+        _UPDATE_STATE["finished_at"] = datetime.now(timezone.utc).isoformat()
+        _UPDATE_STATE["running"] = False
+
+
+@api.get("/system/info")
+async def system_info(user: dict = Depends(require_super_admin())):
+    """Returns git/version info for the update panel."""
+    git = _get_git_info()
+    return {
+        "app_version": "Voxyra CCA",
+        "app_dir": str(APP_ROOT),
+        "git": git,
+        "update_state": {k: _UPDATE_STATE.get(k) for k in ("running", "started_at", "finished_at", "success")},
+    }
+
+
+@api.post("/system/update/check")
+async def system_update_check(user: dict = Depends(require_super_admin())):
+    info = _get_git_info()
+    if not info.get("installed"):
+        raise HTTPException(status_code=400, detail=f"{APP_ROOT} não é um repositório Git.")
+    return {"branch": info.get("branch"), "current": info.get("commit"),
+            "has_updates": info.get("has_updates", False),
+            "commits_behind": info.get("commits_behind", 0),
+            "fetch_ok": info.get("fetch_ok", False),
+            "fetch_error": info.get("fetch_error")}
+
+
+@api.post("/system/update/run")
+async def system_update_run(user: dict = Depends(require_super_admin())):
+    if _UPDATE_STATE.get("running"):
+        raise HTTPException(status_code=409, detail="Uma atualização já está em andamento")
+    if not (APP_ROOT / ".git").exists():
+        raise HTTPException(status_code=400, detail=f"{APP_ROOT} não é um repositório Git. Clone via git para habilitar updates pela web.")
+    await write_audit(user, "update", "system", "app", "Atualização via web", {"started_at": datetime.now(timezone.utc).isoformat()})
+    asyncio.create_task(_run_update_task())
+    return {"ok": True, "message": "Atualização iniciada"}
+
+
+@api.get("/system/update/status")
+async def system_update_status(user: dict = Depends(require_super_admin()), since: int = 0):
+    log = _UPDATE_STATE.get("log", [])
+    return {
+        "running": _UPDATE_STATE.get("running", False),
+        "success": _UPDATE_STATE.get("success"),
+        "started_at": _UPDATE_STATE.get("started_at"),
+        "finished_at": _UPDATE_STATE.get("finished_at"),
+        "log": log[since:],
+        "total_lines": len(log),
+    }
+
+
+# ---------- FusionPBX Integration ----------
+
+
 @api.get("/fusionpbx/settings")
 async def get_fusion_settings(user: dict = Depends(get_current_user), tenant_id: Optional[str] = None):
     tid = await _resolve_tenant_for_fusion(user, tenant_id)

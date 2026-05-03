@@ -1,7 +1,7 @@
 import { NavLink, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard, PhoneCall, Disc3, BarChart3, Users, UserCog, LogOut, Headphones,
-  Tv2, ShieldCheck, History, Building2, X, Sparkles, CreditCard, Receipt, Server,
+  Tv2, ShieldCheck, History, Building2, X, Sparkles, CreditCard, Receipt, Server, Download,
 } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
 
@@ -80,6 +80,10 @@ export default function Sidebar() {
             <NavLink to="/charges" end data-testid="nav-charges"
               className={({ isActive }) => `sidebar-item flex items-center gap-3 px-3 py-2 text-sm text-zinc-300 border-l-2 border-transparent rounded-r-sm ${isActive ? "active" : ""}`}>
               <Receipt size={16} strokeWidth={1.8} /><span>Faturas</span>
+            </NavLink>
+            <NavLink to="/system" end data-testid="nav-system"
+              className={({ isActive }) => `sidebar-item flex items-center gap-3 px-3 py-2 text-sm text-zinc-300 border-l-2 border-transparent rounded-r-sm ${isActive ? "active" : ""}`}>
+              <Download size={16} strokeWidth={1.8} /><span>Atualizações</span>
             </NavLink>
           </>
         )}

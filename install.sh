@@ -215,6 +215,20 @@ supervisorctl update
 supervisorctl restart ${APP_NAME}-backend
 ok "Supervisor: backend rodando em :8001"
 
+# -------- 9b. Sudoers: permitir que o backend reinicie o supervisor e git --------
+log "Configurando sudoers para atualização via web..."
+cat > /etc/sudoers.d/${APP_NAME}-webupdate <<EOF
+# Permite que o backend (user: ${APP_USER}) reinicie o supervisor para o update via web
+${APP_USER} ALL=(ALL) NOPASSWD: /usr/bin/supervisorctl restart ${APP_NAME}-backend
+${APP_USER} ALL=(ALL) NOPASSWD: /usr/bin/supervisorctl reload
+EOF
+chmod 0440 /etc/sudoers.d/${APP_NAME}-webupdate
+
+# Permite que o usuário voxyra use git em /opt/CallCenter sem erro de ownership
+sudo -u ${APP_USER} git config --global --add safe.directory $APP_DIR 2>/dev/null || true
+git config --global --add safe.directory $APP_DIR 2>/dev/null || true
+ok "Sudoers + git config prontos para atualização via web"
+
 # -------- 10. Nginx --------
 log "Configurando Nginx..."
 SERVER_NAME="${DOMAIN:-_}"

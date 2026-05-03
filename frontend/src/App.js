@@ -20,6 +20,7 @@ import Plans from "./pages/Plans";
 import BillingSettings from "./pages/BillingSettings";
 import Charges from "./pages/Charges";
 import FusionPBXSettings from "./pages/FusionPBXSettings";
+import SystemUpdate from "./pages/SystemUpdate";
 
 function App() {
   return (
@@ -42,6 +43,7 @@ function App() {
             <Route path="/billing" element={<ProtectedRoute requireSuperAdmin><BillingSettings /></ProtectedRoute>} />
             <Route path="/charges" element={<ProtectedRoute requireSuperAdmin><Charges /></ProtectedRoute>} />
             <Route path="/fusionpbx" element={<ProtectedRoute><FusionPBXSettings /></ProtectedRoute>} />
+            <Route path="/system" element={<ProtectedRoute requireSuperAdmin><SystemUpdate /></ProtectedRoute>} />
           </Routes>
           <Toaster richColors position="top-right" />
         </BrowserRouter>
