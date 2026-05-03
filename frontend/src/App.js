@@ -21,12 +21,14 @@ import BillingSettings from "./pages/BillingSettings";
 import Charges from "./pages/Charges";
 import FusionPBXSettings from "./pages/FusionPBXSettings";
 import SystemUpdate from "./pages/SystemUpdate";
+import VersionWatcher from "./components/VersionWatcher";
 
 function App() {
   return (
     <div className="App">
       <AuthProvider>
         <BrowserRouter>
+          <VersionWatcher />
           <Routes>
             <Route path="/login" element={<Login />} />
             <Route path="/" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />

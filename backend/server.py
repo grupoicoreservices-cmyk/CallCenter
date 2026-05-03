@@ -1411,6 +1411,36 @@ import asyncio
 
 _UPDATE_STATE: Dict[str, Any] = {"running": False, "log": [], "started_at": None, "finished_at": None, "success": None}
 APP_ROOT = Path("/opt/CallCenter")
+FRONTEND_BUILD = APP_ROOT / "frontend" / "build"
+
+
+def _get_build_version() -> str:
+    """Returns a unique identifier of the current frontend build.
+    Uses the main.js hash from asset-manifest.json (changes every rebuild).
+    Falls back to mtime of index.html."""
+    try:
+        manifest = FRONTEND_BUILD / "asset-manifest.json"
+        if manifest.exists():
+            with open(manifest) as f:
+                data = json.load(f)
+            main_js = data.get("files", {}).get("main.js", "")
+            if main_js:
+                # main.<hash>.js -> hash
+                parts = main_js.split("/")[-1].split(".")
+                if len(parts) >= 3:
+                    return parts[1]
+        idx = FRONTEND_BUILD / "index.html"
+        if idx.exists():
+            return str(int(idx.stat().st_mtime))
+    except Exception:
+        pass
+    return "dev"
+
+
+@api.get("/system/version")
+async def system_version():
+    """Public endpoint so any authenticated client can detect updates."""
+    return {"build": _get_build_version()}
 
 
 def _get_git_info() -> Dict[str, Any]:
