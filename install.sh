@@ -21,7 +21,7 @@
 set -euo pipefail
 
 # -------- Configurações (edite conforme necessário) --------
-APP_NAME="voxyra-cca"
+APP_NAME="CallCenter"
 APP_DIR="/opt/${APP_NAME}"
 APP_USER="voxyra"
 DOMAIN="${DOMAIN:-}"                    # ex: voxyra.empresa.com.br (opcional, p/ SSL)
