@@ -92,14 +92,43 @@ fi
 npm install -g yarn --silent
 ok "Node $(node --version) · Yarn $(yarn --version)"
 
-# -------- 3. Python 3.11 --------
-if ! command -v python3.11 &>/dev/null; then
-    log "Instalando Python 3.11..."
-    add-apt-repository -y ppa:deadsnakes/ppa >/dev/null 2>&1 || true
-    apt-get update -qq
-    apt-get install -y -qq python3.11 python3.11-venv python3.11-dev
+# -------- 3. Python (3.11 em 22.04, 3.12 em 24.04) --------
+PY_BIN=""
+if command -v python3.12 &>/dev/null; then
+    PY_BIN="python3.12"
+    log "Python 3.12 já instalado"
+elif command -v python3.11 &>/dev/null; then
+    PY_BIN="python3.11"
+    log "Python 3.11 já instalado"
+else
+    log "Instalando Python (3.12 nativo ou 3.11 via PPA)..."
+    UBUNTU_VER=$(lsb_release -rs | cut -d. -f1)
+    if [ "$UBUNTU_VER" -ge 24 ]; then
+        # Ubuntu 24.04+ tem python3.12 no repositório padrão
+        apt-get install -y -qq python3.12 python3.12-venv python3.12-dev python3-pip || \
+        apt-get install -y -qq python3 python3-venv python3-dev python3-pip
+        PY_BIN=$(command -v python3.12 || command -v python3)
+    else
+        # Ubuntu 22.04: usar PPA deadsnakes para 3.11
+        add-apt-repository -y ppa:deadsnakes/ppa >/dev/null 2>&1 || \
+            warn "Falha ao adicionar PPA deadsnakes. Tentando pacotes padrão."
+        apt-get update -qq
+        if apt-get install -y -qq python3.11 python3.11-venv python3.11-dev 2>/dev/null; then
+            PY_BIN="python3.11"
+        else
+            warn "Python 3.11 não disponível. Usando python3 do sistema."
+            apt-get install -y -qq python3 python3-venv python3-dev python3-pip
+            PY_BIN="python3"
+        fi
+    fi
 fi
-ok "$(python3.11 --version)"
+[ -z "$PY_BIN" ] && die "Nenhum Python 3 disponível no sistema"
+PY_VERSION=$("$PY_BIN" --version 2>&1)
+ok "$PY_VERSION ($PY_BIN)"
+
+# Garantir que o pacote venv esteja disponível para a versão detectada
+PY_MINOR=$("$PY_BIN" -c "import sys;print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+apt-get install -y -qq "python${PY_MINOR}-venv" "python${PY_MINOR}-dev" 2>/dev/null || true
 
 # -------- 4. MongoDB 7 --------
 if ! systemctl is-active --quiet mongod 2>/dev/null; then
@@ -155,10 +184,10 @@ fi
 chown -R "$APP_USER":"$APP_USER" "$APP_DIR"
 
 # -------- 7. Backend: venv + dependências --------
-log "Configurando backend Python..."
+log "Configurando backend Python ($PY_BIN)..."
 cd "$APP_DIR/backend"
 
-sudo -u "$APP_USER" python3.11 -m venv venv
+sudo -u "$APP_USER" "$PY_BIN" -m venv venv
 sudo -u "$APP_USER" bash -c "source venv/bin/activate && pip install --upgrade pip --quiet && pip install -r requirements.txt --quiet"
 
 # .env do backend
