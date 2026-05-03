@@ -764,6 +764,37 @@ async def dashboard_abandoned(user: dict = Depends(require_permission("dashboard
 @api.get("/realtime/calls")
 async def realtime_calls(user: dict = Depends(require_permission("realtime.view"))):
     f = tenant_filter(user)
+    tid = tenant_scope(user)
+    # Try to get live calls from FusionPBX if integration is enabled
+    if tid:
+        s = await db.fusionpbx_settings.find_one({"tenant_id": tid})
+        if s and s.get("enabled") and s.get("base_url"):
+            try:
+                client = FusionPBXClient(
+                    base_url=s["base_url"], api_key=s.get("api_key"),
+                    username=s.get("username"), password=s.get("password"),
+                    domain_uuid=s.get("domain_uuid"), domain_name=s.get("domain_name"),
+                    verify_ssl=bool(s.get("verify_ssl", True)),
+                )
+                raw = await client.list_active_calls()
+                if raw:
+                    calls = []
+                    for c in raw:
+                        calls.append({
+                            "id": c.get("uuid") or c.get("call_uuid") or str(uuid.uuid4()),
+                            "agent_name": c.get("agent_name") or c.get("cc_agent") or "—",
+                            "agent_extension": str(c.get("destination") or c.get("extension") or "—"),
+                            "agent_avatar": None,
+                            "queue_name": c.get("queue_name") or "—",
+                            "caller_number": c.get("caller_id_number") or c.get("cid_num") or "—",
+                            "direction": c.get("direction") if c.get("direction") in ("inbound", "outbound") else "inbound",
+                            "elapsed_sec": int(c.get("duration", 0) or 0),
+                            "status": "incall" if c.get("answer_state") == "answered" else "ringing",
+                        })
+                    return {"calls": calls, "source": "fusionpbx"}
+            except FusionPBXError:
+                pass  # fallback to DB
+    # Fallback: just show agents currently in "incall" status (no fake data)
     agents = await db.agents.find({**f, "status": "incall"}, {"_id": 0}).to_list(100)
     queues = {q["id"]: q for q in await db.queues.find(f, {"_id": 0}).to_list(100)}
     active = []
@@ -774,18 +805,10 @@ async def realtime_calls(user: dict = Depends(require_permission("realtime.view"
             "id": str(uuid.uuid4()),
             "agent_name": a["name"], "agent_extension": a["extension"], "agent_avatar": a.get("avatar"),
             "queue_name": q.get("name", "—"),
-            "caller_number": f"+55 11 9{random.randint(1000,9999)}-{random.randint(1000,9999)}",
-            "direction": random.choice(CALL_DIR), "elapsed_sec": random.randint(15, 900), "status": "incall",
+            "caller_number": "—",
+            "direction": "inbound", "elapsed_sec": 0, "status": "incall",
         })
-    for _ in range(random.randint(0, 3)):
-        q = random.choice(list(queues.values())) if queues else {}
-        active.append({
-            "id": str(uuid.uuid4()), "agent_name": "—", "agent_extension": "—", "agent_avatar": None,
-            "queue_name": q.get("name", "—"),
-            "caller_number": f"+55 11 9{random.randint(1000,9999)}-{random.randint(1000,9999)}",
-            "direction": "inbound", "elapsed_sec": random.randint(5, 60), "status": "ringing",
-        })
-    return {"calls": active}
+    return {"calls": active, "source": "local"}
 
 @api.get("/agents")
 async def list_agents(user: dict = Depends(require_permission("agents.view"))):
@@ -1445,6 +1468,25 @@ async def fusion_test(user: dict = Depends(get_current_user), tenant_id: Optiona
         return {"ok": True, **result}
     except FusionPBXError as e:
         raise HTTPException(status_code=502, detail=str(e))
+
+
+@api.post("/fusionpbx/clear-demo-data")
+async def fusion_clear_demo_data(user: dict = Depends(get_current_user), tenant_id: Optional[str] = None):
+    """Deletes all mocked/seeded data (entities without external_id) from the tenant.
+    Real data synced from FusionPBX has external_id set, so it stays intact."""
+    tid = await _resolve_tenant_for_fusion(user, tenant_id)
+    if user.get("role") not in ("super_admin", "admin"):
+        raise HTTPException(status_code=403, detail="Sem permissão")
+    # Delete entities without external_id (= seeded demo data)
+    demo_filter = {"tenant_id": tid, "$or": [
+        {"external_id": {"$exists": False}}, {"external_id": None}
+    ]}
+    deleted = {}
+    for col in ("agents", "queues", "calls", "recordings"):
+        res = await db[col].delete_many(demo_filter)
+        deleted[col] = res.deleted_count
+    await write_audit(user, "clear", "demo_data", tid, "Limpeza de dados simulados", deleted)
+    return {"ok": True, "deleted": deleted, "tenant_id": tid}
 
 
 @api.post("/fusionpbx/sync")
