@@ -92,16 +92,12 @@ fi
 npm install -g yarn --silent
 ok "Node $(node --version) · Yarn $(yarn --version)"
 
-# -------- 3. Python 3 (usa a versão nativa do Ubuntu) --------
-log "Instalando Python 3 (versão nativa do sistema)..."
-apt-get install -y python3 python3-venv python3-dev python3-pip
-PY_BIN="python3"
+# -------- 3. Python 3.12 --------
+log "Instalando Python 3.12..."
+apt-get install -y python3.12 python3.12-venv python3.12-dev python3-pip
+PY_BIN="python3.12"
 PY_VERSION=$("$PY_BIN" --version 2>&1)
 ok "$PY_VERSION"
-
-# Garantir que o pacote venv específico da versão detectada esteja disponível
-PY_MINOR=$("$PY_BIN" -c "import sys;print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-apt-get install -y "python${PY_MINOR}-venv" "python${PY_MINOR}-dev" 2>/dev/null || true
 
 # -------- 4. MongoDB 7 --------
 if ! systemctl is-active --quiet mongod 2>/dev/null; then
