@@ -1531,18 +1531,34 @@ async def _run_update_task():
             append(f"   Rode na VPS: sudo chown -R voxyra:voxyra {APP_ROOT}")
             _UPDATE_STATE["success"] = False
             return
-        # Pre-flight: check sudo rights for supervisorctl
-        check = await asyncio.create_subprocess_shell(
-            "sudo -n supervisorctl status CallCenter-backend",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        _, sterr = await check.communicate()
-        if check.returncode != 0 and b"password" in sterr.lower():
+        # Pre-flight: check sudo rights for supervisorctl (try common paths)
+        sudo_ok = False
+        sudoctl_path = None
+        for path in ("supervisorctl", "/usr/bin/supervisorctl", "/usr/local/bin/supervisorctl"):
+            check = await asyncio.create_subprocess_shell(
+                f"sudo -n {path} status CallCenter-backend",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            sout, serr = await check.communicate()
+            out_combined = (sout or b"") + (serr or b"")
+            if check.returncode == 0 or b"RUNNING" in out_combined or b"STOPPED" in out_combined:
+                sudo_ok = True
+                sudoctl_path = path
+                break
+        if not sudo_ok:
+            # Discover actual path to show in the hint
+            which = await asyncio.create_subprocess_shell(
+                "which supervisorctl", stdout=asyncio.subprocess.PIPE
+            )
+            wout, _ = await which.communicate()
+            actual = wout.decode().strip() if wout else "/usr/bin/supervisorctl"
             append("❌ Sem permissão sudo para reiniciar o supervisor.")
+            append(f"   Supervisorctl detectado em: {actual}")
             append("   Rode na VPS (uma vez):")
             append("   sudo tee /etc/sudoers.d/CallCenter-webupdate > /dev/null <<'EOF'")
-            append("   voxyra ALL=(ALL) NOPASSWD: /usr/bin/supervisorctl restart CallCenter-backend")
-            append("   voxyra ALL=(ALL) NOPASSWD: /usr/bin/supervisorctl reload")
+            append(f"   voxyra ALL=(ALL) NOPASSWD: {actual}")
+            append(f"   voxyra ALL=(ALL) NOPASSWD: /usr/bin/supervisorctl")
+            append(f"   voxyra ALL=(ALL) NOPASSWD: /usr/local/bin/supervisorctl")
             append("   EOF")
             append("   sudo chmod 0440 /etc/sudoers.d/CallCenter-webupdate")
             _UPDATE_STATE["success"] = False
@@ -1572,7 +1588,8 @@ async def _run_update_task():
         _UPDATE_STATE["running"] = False
         # Schedule restart after 1s so the HTTP response is delivered
         await asyncio.sleep(1)
-        await asyncio.create_subprocess_shell("sudo -n supervisorctl restart CallCenter-backend &")
+        restart_cmd = f"sudo -n {sudoctl_path or 'supervisorctl'} restart CallCenter-backend"
+        await asyncio.create_subprocess_shell(f"{restart_cmd} &")
     except Exception as e:
         append(f"❌ Erro: {e}")
         _UPDATE_STATE["success"] = False
