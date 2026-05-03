@@ -24,6 +24,7 @@ from integrations.fusionpbx import (
     FusionPBXClient, FusionPBXError,
     normalize_extension, normalize_queue, normalize_cdr,
 )
+from integrations.fusionpbx_db import FusionPBXDBClient, FusionPBXDBError
 
 EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
 
@@ -1372,32 +1373,52 @@ async def webhook_paypal(request: Request):
 # ---------- FusionPBX Integration ----------
 class FusionPBXSettings(BaseModel):
     enabled: bool = False
+    # Connection type: "rest" (default) or "db" (direct PostgreSQL)
+    connection_type: str = "rest"
+    # REST mode fields
     base_url: str = ""
     api_key: Optional[str] = None
     username: Optional[str] = None
     password: Optional[str] = None
-    domain_uuid: Optional[str] = None
-    domain_name: Optional[str] = None
     verify_ssl: bool = True
-    sync_interval_minutes: int = 1
-    # Custom REST paths for personalized FusionPBX installations
     path_extensions: Optional[str] = None
     path_queues: Optional[str] = None
     path_agents: Optional[str] = None
     path_cdr: Optional[str] = None
+    # DB mode fields
+    db_host: Optional[str] = None
+    db_port: int = 5432
+    db_name: str = "fusionpbx"
+    db_username: Optional[str] = None
+    db_password: Optional[str] = None
+    db_ssl: bool = False
+    # Common
+    domain_uuid: Optional[str] = None
+    domain_name: Optional[str] = None
+    sync_interval_minutes: int = 1
 
 
 def _serialize_fusion_settings(s: Optional[dict], mask: bool = True) -> dict:
-    if not s: return {"enabled": False, "configured": False}
-    out = {k: s.get(k) for k in ["enabled", "base_url", "username", "domain_uuid", "domain_name",
-                                  "verify_ssl", "sync_interval_minutes", "last_sync_at", "last_sync_status",
-                                  "path_extensions", "path_queues", "path_agents", "path_cdr"]}
-    out["configured"] = bool(s.get("base_url"))
+    if not s: return {"enabled": False, "configured": False, "connection_type": "rest"}
+    out = {k: s.get(k) for k in [
+        "enabled", "connection_type",
+        "base_url", "username", "domain_uuid", "domain_name",
+        "verify_ssl", "sync_interval_minutes", "last_sync_at", "last_sync_status",
+        "path_extensions", "path_queues", "path_agents", "path_cdr",
+        "db_host", "db_port", "db_name", "db_username", "db_ssl",
+    ]}
+    out["connection_type"] = s.get("connection_type") or "rest"
+    if out["connection_type"] == "db":
+        out["configured"] = bool(s.get("db_host") and s.get("db_username"))
+    else:
+        out["configured"] = bool(s.get("base_url"))
     out["api_key_set"] = bool(s.get("api_key"))
     out["password_set"] = bool(s.get("password"))
+    out["db_password_set"] = bool(s.get("db_password"))
     if not mask:
         out["api_key"] = s.get("api_key")
         out["password"] = s.get("password")
+        out["db_password"] = s.get("db_password")
     return out
 
 
@@ -1420,7 +1441,7 @@ APP_ROOT = Path("/opt/CallCenter")
 FRONTEND_BUILD = APP_ROOT / "frontend" / "build"
 
 # Application version - manually incremented on each release
-APP_VERSION = "V3.0 R125"
+APP_VERSION = "V3.0 R126"
 
 
 def _get_build_version() -> str:
@@ -1777,16 +1798,27 @@ async def put_fusion_settings(body: FusionPBXSettings, user: dict = Depends(get_
     return _serialize_fusion_settings(s)
 
 
-async def _build_fusion_client(tid: str) -> FusionPBXClient:
+async def _build_fusion_client(tid: str):
+    """Returns either FusionPBXClient (REST) or FusionPBXDBClient based on connection_type."""
     s = await db.fusionpbx_settings.find_one({"tenant_id": tid})
-    if not s or not s.get("base_url"):
+    if not s:
         raise HTTPException(status_code=400, detail="FusionPBX não configurado para este tenant")
     if not s.get("enabled", False):
         raise HTTPException(status_code=400, detail="Integração FusionPBX desativada")
-    custom_paths = {}
-    for key in ("path_extensions", "path_queues", "path_agents", "path_cdr"):
-        if s.get(key):
-            custom_paths[key.replace("path_", "")] = s[key]
+    ctype = s.get("connection_type") or "rest"
+    if ctype == "db":
+        if not s.get("db_host") or not s.get("db_username"):
+            raise HTTPException(status_code=400, detail="Configuração DB incompleta (host/usuário)")
+        return FusionPBXDBClient(
+            host=s["db_host"], port=int(s.get("db_port") or 5432),
+            database=s.get("db_name") or "fusionpbx",
+            username=s["db_username"], password=s.get("db_password") or "",
+            domain_uuid=s.get("domain_uuid"), ssl=bool(s.get("db_ssl")),
+        )
+    if not s.get("base_url"):
+        raise HTTPException(status_code=400, detail="FusionPBX não configurado para este tenant")
+    custom_paths = {k.replace("path_", ""): s[k] for k in
+                    ("path_extensions", "path_queues", "path_agents", "path_cdr") if s.get(k)}
     return FusionPBXClient(
         base_url=s["base_url"], api_key=s.get("api_key"),
         username=s.get("username"), password=s.get("password"),
@@ -1839,16 +1871,31 @@ async def fusion_clear_demo_data(user: dict = Depends(get_current_user), tenant_
 async def _run_sync_for_tenant(tid: str, cdr_limit: int = 200) -> Dict[str, Any]:
     """Core sync logic reusable by manual endpoint + scheduler."""
     s = await db.fusionpbx_settings.find_one({"tenant_id": tid})
-    if not s or not s.get("enabled") or not s.get("base_url"):
+    if not s or not s.get("enabled"):
         return {"skipped": True, "reason": "not_enabled"}
-    custom_paths = {k.replace("path_", ""): s[k] for k in ("path_extensions", "path_queues", "path_agents", "path_cdr") if s.get(k)}
-    client = FusionPBXClient(
-        base_url=s["base_url"], api_key=s.get("api_key"),
-        username=s.get("username"), password=s.get("password"),
-        domain_uuid=s.get("domain_uuid"), domain_name=s.get("domain_name"),
-        verify_ssl=bool(s.get("verify_ssl", True)),
-        custom_paths=custom_paths,
-    )
+    ctype = s.get("connection_type") or "rest"
+    if ctype == "db":
+        if not s.get("db_host") or not s.get("db_username"):
+            return {"skipped": True, "reason": "db_not_configured"}
+        client = FusionPBXDBClient(
+            host=s["db_host"], port=int(s.get("db_port") or 5432),
+            database=s.get("db_name") or "fusionpbx",
+            username=s["db_username"], password=s.get("db_password") or "",
+            domain_uuid=s.get("domain_uuid"), ssl=bool(s.get("db_ssl")),
+        )
+        ClientErr = FusionPBXDBError
+    else:
+        if not s.get("base_url"):
+            return {"skipped": True, "reason": "rest_not_configured"}
+        custom_paths = {k.replace("path_", ""): s[k] for k in ("path_extensions", "path_queues", "path_agents", "path_cdr") if s.get(k)}
+        client = FusionPBXClient(
+            base_url=s["base_url"], api_key=s.get("api_key"),
+            username=s.get("username"), password=s.get("password"),
+            domain_uuid=s.get("domain_uuid"), domain_name=s.get("domain_name"),
+            verify_ssl=bool(s.get("verify_ssl", True)),
+            custom_paths=custom_paths,
+        )
+        ClientErr = FusionPBXError
     summary = {"agents_synced": 0, "queues_synced": 0, "calls_synced": 0,
                "errors": [], "started_at": datetime.now(timezone.utc).isoformat()}
     # Extensions
@@ -1878,7 +1925,7 @@ async def _run_sync_for_tenant(tid: str, cdr_limit: int = 200) -> Dict[str, Any]
                 doc["created_at"] = doc["updated_at"]
                 await db.agents.insert_one(doc)
             summary["agents_synced"] += 1
-    except FusionPBXError as e:
+    except ClientErr as e:
         summary["errors"].append(f"extensions: {e}")
     # Queues
     try:
@@ -1904,7 +1951,7 @@ async def _run_sync_for_tenant(tid: str, cdr_limit: int = 200) -> Dict[str, Any]
                 doc["created_at"] = doc["updated_at"]
                 await db.queues.insert_one(doc)
             summary["queues_synced"] += 1
-    except FusionPBXError as e:
+    except ClientErr as e:
         summary["errors"].append(f"queues: {e}")
     # CDR
     try:
@@ -1950,7 +1997,7 @@ async def _run_sync_for_tenant(tid: str, cdr_limit: int = 200) -> Dict[str, Any]
                         "started_at": n["started_at"], "notes": "",
                     })
             summary["calls_synced"] += 1
-    except FusionPBXError as e:
+    except ClientErr as e:
         summary["errors"].append(f"cdr: {e}")
     summary["finished_at"] = datetime.now(timezone.utc).isoformat()
     summary["status"] = "error" if summary["errors"] and summary["agents_synced"] == 0 else "ok"

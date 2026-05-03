@@ -21,9 +21,12 @@ export default function FusionPBXSettings() {
   const [diag, setDiag] = useState(null);
   const [diagLoading, setDiagLoading] = useState(false);
   const [form, setForm] = useState({
-    enabled: false, base_url: "", api_key: "", username: "", password: "",
+    enabled: false, connection_type: "rest",
+    base_url: "", api_key: "", username: "", password: "",
     domain_uuid: "", domain_name: "", verify_ssl: true, sync_interval_minutes: 1,
     path_extensions: "", path_queues: "", path_agents: "", path_cdr: "",
+    db_host: "", db_port: 5432, db_name: "fusionpbx",
+    db_username: "", db_password: "", db_ssl: false,
   });
   const [meta, setMeta] = useState({});
   const [saving, setSaving] = useState(false);
@@ -35,7 +38,9 @@ export default function FusionPBXSettings() {
     try {
       const { data } = await api.get(`/fusionpbx/settings${qs}`);
       setForm({
-        enabled: !!data.enabled, base_url: data.base_url || "",
+        enabled: !!data.enabled,
+        connection_type: data.connection_type || "rest",
+        base_url: data.base_url || "",
         api_key: "", username: data.username || "", password: "",
         domain_uuid: data.domain_uuid || "", domain_name: data.domain_name || "",
         verify_ssl: data.verify_ssl !== false,
@@ -44,6 +49,12 @@ export default function FusionPBXSettings() {
         path_queues: data.path_queues || "",
         path_agents: data.path_agents || "",
         path_cdr: data.path_cdr || "",
+        db_host: data.db_host || "",
+        db_port: data.db_port || 5432,
+        db_name: data.db_name || "fusionpbx",
+        db_username: data.db_username || "",
+        db_password: "",
+        db_ssl: !!data.db_ssl,
       });
       setMeta({
         configured: data.configured, api_key_set: data.api_key_set, password_set: data.password_set,
@@ -60,6 +71,7 @@ export default function FusionPBXSettings() {
       // Only send secrets if user typed something
       if (!payload.api_key) delete payload.api_key;
       if (!payload.password) delete payload.password;
+      if (!payload.db_password) delete payload.db_password;
       await api.put(`/fusionpbx/settings${qs}`, payload);
       toast.success("Configuração salva");
       load();
@@ -184,37 +196,119 @@ export default function FusionPBXSettings() {
             </label>
           </div>
 
-          <div><Label>URL Base do servidor</Label>
-            <Input value={form.base_url} onChange={(e) => setForm({ ...form, base_url: e.target.value })}
-                   placeholder="https://pbx.empresa.com.br" data-testid="fpbx-url" />
-            <div className="text-[10px] text-muted-foreground mt-1">URL pública (https). Sem barra final.</div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <div><Label>API Key {meta.api_key_set && <span className="text-[10px] text-emerald-600 ml-1">✓ configurada</span>}</Label>
-              <Input value={form.api_key} onChange={(e) => setForm({ ...form, api_key: e.target.value })}
-                     placeholder="Bearer token" type="password" data-testid="fpbx-key" />
-            </div>
-            <div><Label>Username (Basic auth · alternativo)</Label>
-              <Input value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })}
-                     placeholder="admin" data-testid="fpbx-user" />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <div><Label>Password {meta.password_set && <span className="text-[10px] text-emerald-600 ml-1">✓ configurada</span>}</Label>
-              <Input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} data-testid="fpbx-pass" />
-            </div>
-            <div className="flex items-end">
-              <label className="flex items-center gap-2 text-sm">
-                <Switch checked={form.verify_ssl} onCheckedChange={(v) => setForm({ ...form, verify_ssl: v })} />
-                Verificar SSL
-              </label>
+          {/* Connection mode selector */}
+          <div className="border-y border-border py-3">
+            <Label className="text-xs uppercase tracking-widest font-medium">Modo de conexão</Label>
+            <div className="grid grid-cols-2 gap-2 mt-2">
+              <button type="button" onClick={() => setForm({ ...form, connection_type: "rest" })}
+                className={`border rounded p-3 text-left transition ${form.connection_type === "rest" ? "border-emerald-600 bg-emerald-50" : "border-border hover:bg-zinc-50"}`}
+                data-testid="fpbx-mode-rest">
+                <div className="font-medium text-sm">REST API</div>
+                <div className="text-[10px] text-muted-foreground mt-1">Endpoints HTTP. Requer FusionPBX-API instalado.</div>
+              </button>
+              <button type="button" onClick={() => setForm({ ...form, connection_type: "db" })}
+                className={`border rounded p-3 text-left transition ${form.connection_type === "db" ? "border-emerald-600 bg-emerald-50" : "border-border hover:bg-zinc-50"}`}
+                data-testid="fpbx-mode-db">
+                <div className="font-medium text-sm">PostgreSQL Direto ⭐</div>
+                <div className="text-[10px] text-muted-foreground mt-1">Conecta direto no banco. Sem instalar nada no PBX.</div>
+              </button>
             </div>
           </div>
 
+          {form.connection_type === "db" ? (
+            <div className="space-y-3">
+              <div className="grid grid-cols-3 gap-2">
+                <div className="col-span-2"><Label>Host PostgreSQL <span className="text-red-600">*</span></Label>
+                  <Input value={form.db_host} onChange={(e) => setForm({ ...form, db_host: e.target.value })}
+                         placeholder="51.222.195.17 ou pbx.empresa.com.br" data-testid="fpbx-db-host" />
+                </div>
+                <div><Label>Porta</Label>
+                  <Input type="number" value={form.db_port}
+                         onChange={(e) => setForm({ ...form, db_port: parseInt(e.target.value) || 5432 })}
+                         data-testid="fpbx-db-port" />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div><Label>Database</Label>
+                  <Input value={form.db_name} onChange={(e) => setForm({ ...form, db_name: e.target.value })}
+                         placeholder="fusionpbx" data-testid="fpbx-db-name" />
+                </div>
+                <div className="flex items-end">
+                  <label className="flex items-center gap-2 text-sm">
+                    <Switch checked={form.db_ssl} onCheckedChange={(v) => setForm({ ...form, db_ssl: v })} />
+                    SSL/TLS
+                  </label>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div><Label>Usuário (read-only) <span className="text-red-600">*</span></Label>
+                  <Input value={form.db_username} onChange={(e) => setForm({ ...form, db_username: e.target.value })}
+                         placeholder="voxyra_ro" data-testid="fpbx-db-user" />
+                </div>
+                <div><Label>Senha {meta.db_password_set && <span className="text-[10px] text-emerald-600 ml-1">✓ configurada</span>}</Label>
+                  <Input type="password" value={form.db_password} onChange={(e) => setForm({ ...form, db_password: e.target.value })}
+                         data-testid="fpbx-db-pass" />
+                </div>
+              </div>
+              <div className="border border-blue-200 bg-blue-50 rounded p-3 text-xs text-blue-900">
+                <strong>💡 Como criar usuário read-only no FusionPBX:</strong>
+                <pre className="bg-white p-2 rounded mt-1 font-mono text-[10px] overflow-x-auto whitespace-pre-wrap">{`# No servidor FusionPBX (1 vez):
+sudo -u postgres psql -d fusionpbx <<'SQL'
+CREATE USER voxyra_ro WITH PASSWORD 'TROCAR_SENHA_FORTE';
+GRANT CONNECT ON DATABASE fusionpbx TO voxyra_ro;
+GRANT USAGE ON SCHEMA public TO voxyra_ro;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO voxyra_ro;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT SELECT ON TABLES TO voxyra_ro;
+SQL
+
+# Liberar conexão remota (descobre versão):
+PG_VER=$(ls /etc/postgresql/ | head -1)
+echo "host fusionpbx voxyra_ro IP_DO_VOXYRA/32 md5" | \
+  sudo tee -a /etc/postgresql/$PG_VER/main/pg_hba.conf
+
+# Listen all:
+sudo sed -i "s/#listen_addresses = 'localhost'/listen_addresses = '*'/" \\
+  /etc/postgresql/$PG_VER/main/postgresql.conf
+
+sudo systemctl restart postgresql`}</pre>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div><Label>URL Base do servidor</Label>
+                <Input value={form.base_url} onChange={(e) => setForm({ ...form, base_url: e.target.value })}
+                       placeholder="https://pbx.empresa.com.br" data-testid="fpbx-url" />
+                <div className="text-[10px] text-muted-foreground mt-1">URL pública (https). Sem barra final.</div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div><Label>API Key {meta.api_key_set && <span className="text-[10px] text-emerald-600 ml-1">✓ configurada</span>}</Label>
+                  <Input value={form.api_key} onChange={(e) => setForm({ ...form, api_key: e.target.value })}
+                         placeholder="Bearer token" type="password" data-testid="fpbx-key" />
+                </div>
+                <div><Label>Username (Basic auth · alternativo)</Label>
+                  <Input value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })}
+                         placeholder="admin" data-testid="fpbx-user" />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div><Label>Password {meta.password_set && <span className="text-[10px] text-emerald-600 ml-1">✓ configurada</span>}</Label>
+                  <Input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} data-testid="fpbx-pass" />
+                </div>
+                <div className="flex items-end">
+                  <label className="flex items-center gap-2 text-sm">
+                    <Switch checked={form.verify_ssl} onCheckedChange={(v) => setForm({ ...form, verify_ssl: v })} />
+                    Verificar SSL
+                  </label>
+                </div>
+              </div>
+            </>
+          )}
+
           <div className="grid grid-cols-2 gap-3">
-            <div><Label>Domain UUID</Label>
+            <div><Label>Domain UUID {form.connection_type === "db" && <span className="text-red-600">*</span>}</Label>
               <Input value={form.domain_uuid} onChange={(e) => setForm({ ...form, domain_uuid: e.target.value })}
                      placeholder="xxxxxxxx-xxxx-..." className="font-mono text-xs" data-testid="fpbx-domain-uuid" />
             </div>
@@ -231,8 +325,8 @@ export default function FusionPBXSettings() {
             </div>
           </div>
 
-          {/* Endpoints REST customizados (para FusionPBX personalizado) */}
-          <div className="border border-amber-200 bg-amber-50 rounded-sm p-3 space-y-2">
+          {form.connection_type === "rest" && (
+            <div className="border border-amber-200 bg-amber-50 rounded-sm p-3 space-y-2">
             <div className="flex items-center gap-2 text-xs font-medium text-amber-900">
               <Settings2 size={12} />
               Endpoints REST customizados <span className="font-normal text-[10px] text-muted-foreground">(opcional · se seu FusionPBX não usar os paths padrão)</span>
@@ -267,6 +361,7 @@ export default function FusionPBXSettings() {
               Dica: aponte para seus scripts PHP que retornam JSON. Exemplo de script: <code className="font-mono bg-white px-1">SELECT * FROM v_extensions WHERE domain_uuid='UUID'</code> encoded como JSON.
             </div>
           </div>
+          )}
 
           <div className="border-t border-border pt-3 flex gap-2 flex-wrap">
             <Button onClick={save} disabled={saving} data-testid="fpbx-save">
