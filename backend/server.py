@@ -1420,7 +1420,7 @@ APP_ROOT = Path("/opt/CallCenter")
 FRONTEND_BUILD = APP_ROOT / "frontend" / "build"
 
 # Application version - manually incremented on each release
-APP_VERSION = "V3.0 R124"
+APP_VERSION = "V3.0 R125"
 
 
 def _get_build_version() -> str:

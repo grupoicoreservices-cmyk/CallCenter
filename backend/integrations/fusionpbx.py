@@ -21,13 +21,18 @@ class FusionPBXError(Exception):
 
 
 class FusionPBXClient:
-    """REST client for FusionPBX. Tries Authorization: Bearer <api_key> first, then Basic auth."""
+    """REST client for FusionPBX. Supports:
+       - Bearer token auth (api_key)
+       - Basic auth (username/password)
+       - FusionPBX-API by Adrian Fretwell (api-key{UUID} inline format)
+    """
 
     def __init__(self, base_url: str, api_key: Optional[str] = None,
                  username: Optional[str] = None, password: Optional[str] = None,
                  domain_uuid: Optional[str] = None, domain_name: Optional[str] = None,
                  verify_ssl: bool = True,
-                 custom_paths: Optional[Dict[str, str]] = None):
+                 custom_paths: Optional[Dict[str, str]] = None,
+                 api_style: str = "auto"):
         if not base_url:
             raise FusionPBXError("base_url do FusionPBX não configurado")
         self.base_url = base_url.rstrip("/")
@@ -38,7 +43,22 @@ class FusionPBXClient:
         self.domain_name = domain_name
         self.verify_ssl = verify_ssl
         self.custom_paths = custom_paths or {}
+        # api_style: "auto" | "bearer" | "inline_key" (Fretwell's FusionPBX-API)
+        self.api_style = api_style
         self.timeout = httpx.Timeout(30.0)
+
+    def _is_uuid(self, v: Optional[str]) -> bool:
+        return bool(v) and len(v) == 36 and v.count("-") == 4
+
+    def _apply_inline_key(self, path: str) -> str:
+        """FusionPBX-API by Fretwell requires /api-key{uuid} suffix.
+        If api_key is a UUID and path doesn't already contain api-key, append it."""
+        if "api-key{" in path:
+            return path
+        if self.api_style == "inline_key" or (self.api_style == "auto" and self._is_uuid(self.api_key)):
+            path = path.rstrip("/")
+            return f"{path}/api-key{{{self.api_key}}}"
+        return path
 
     def _auth(self):
         if self.username and self.password:
@@ -47,11 +67,13 @@ class FusionPBXClient:
 
     def _headers(self) -> Dict[str, str]:
         h = {"Accept": "application/json"}
-        if self.api_key:
+        # Bearer header only if NOT using inline-key style
+        if self.api_key and not (self.api_style == "inline_key" or (self.api_style == "auto" and self._is_uuid(self.api_key))):
             h["Authorization"] = f"Bearer {self.api_key}"
         return h
 
     async def _request(self, method: str, path: str, **kwargs) -> Any:
+        path = self._apply_inline_key(path)
         url = f"{self.base_url}{path}" if path.startswith("/") else f"{self.base_url}/{path}"
         async with httpx.AsyncClient(timeout=self.timeout, verify=self.verify_ssl, follow_redirects=True) as client:
             try:
@@ -66,7 +88,11 @@ class FusionPBXClient:
                     return r.json()
                 except Exception:
                     return {"raw": r.text}
-            return {"raw": r.text}
+            # FusionPBX-API returns JSON sometimes without the correct content-type
+            try:
+                return r.json()
+            except Exception:
+                return {"raw": r.text}
 
     async def ping(self) -> Dict[str, Any]:
         """Simple health check. Tries /api/status, fallback to /."""
@@ -80,6 +106,13 @@ class FusionPBXClient:
             except Exception as e:
                 raise FusionPBXError(f"Servidor inacessível: {e}") from e
 
+    def _params_for_style(self, params: dict) -> dict:
+        """Fretwell's API uses $_SESSION['domain_uuid'] from the api-key's domain,
+        so we don't pass domain_uuid as query param."""
+        if self.api_style == "inline_key" or (self.api_style == "auto" and self._is_uuid(self.api_key)):
+            params = {k: v for k, v in params.items() if k != "domain_uuid"}
+        return params
+
     async def list_extensions(self) -> List[Dict[str, Any]]:
         """Try custom path first, then common endpoints used by community scripts."""
         params = {}
@@ -87,12 +120,13 @@ class FusionPBXClient:
         paths = []
         if self.custom_paths.get("extensions"):
             paths.append(self.custom_paths["extensions"])
-        paths.extend(["/api/extensions", "/app/extensions/api/extensions.php",
-                      "/api/v1/extensions", "/api/user", "/app/users/api/users.php"])
+        paths.extend(["/app/api/extensions", "/api/extensions",
+                      "/app/extensions/api/extensions.php",
+                      "/api/v1/extensions"])
         last_err = None
         for path in paths:
             try:
-                data = await self._request("GET", path, params=params)
+                data = await self._request("GET", path, params=self._params_for_style(params))
                 if isinstance(data, list): return data
                 if isinstance(data, dict):
                     for k in ("data", "extensions", "items", "rows", "users"):
@@ -102,8 +136,8 @@ class FusionPBXClient:
                 last_err = e
                 continue
         raise FusionPBXError(
-            f"Nenhum endpoint REST de extensions encontrado. Configure 'path_extensions' nas configurações "
-            f"(ex: /app/extensions/my_api.php). Último erro: {last_err}"
+            f"Nenhum endpoint REST de extensions encontrado. "
+            f"Configure 'Path Extensions' na aba Configuração. Último erro: {last_err}"
         )
 
     async def list_call_center_queues(self) -> List[Dict[str, Any]]:
@@ -112,12 +146,12 @@ class FusionPBXClient:
         paths = []
         if self.custom_paths.get("queues"):
             paths.append(self.custom_paths["queues"])
-        paths.extend(["/api/call_center_queues", "/app/call_center/api/queues.php",
-                      "/api/v1/call_center/queues", "/app/ring_groups/api/ring_groups.php"])
+        paths.extend(["/app/api/call_center_queues", "/api/call_center_queues",
+                      "/app/call_center/api/queues.php", "/api/v1/call_center/queues"])
         last_err = None
         for path in paths:
             try:
-                data = await self._request("GET", path, params=params)
+                data = await self._request("GET", path, params=self._params_for_style(params))
                 if isinstance(data, list): return data
                 if isinstance(data, dict):
                     for k in ("data", "queues", "items", "rows", "call_center_queues"):
@@ -127,8 +161,7 @@ class FusionPBXClient:
                 last_err = e
                 continue
         raise FusionPBXError(
-            f"Nenhum endpoint REST de queues encontrado. Configure 'path_queues'. "
-            f"Último erro: {last_err}"
+            f"Nenhum endpoint REST de queues encontrado. Configure 'Path Queues'. Último erro: {last_err}"
         )
 
     async def list_call_center_agents(self) -> List[Dict[str, Any]]:
@@ -137,18 +170,18 @@ class FusionPBXClient:
         paths = []
         if self.custom_paths.get("agents"):
             paths.append(self.custom_paths["agents"])
-        paths.extend(["/api/call_center_agents", "/app/call_center/api/agents.php",
-                      "/api/v1/call_center/agents"])
+        paths.extend(["/app/api/call_center_agents", "/api/call_center_agents",
+                      "/app/call_center/api/agents.php", "/api/v1/call_center/agents"])
         for path in paths:
             try:
-                data = await self._request("GET", path, params=params)
+                data = await self._request("GET", path, params=self._params_for_style(params))
                 if isinstance(data, list): return data
                 if isinstance(data, dict):
                     for k in ("data", "agents", "items", "rows"):
                         if k in data and isinstance(data[k], list): return data[k]
             except FusionPBXError:
                 continue
-        return []  # agents may overlap with extensions, don't fail
+        return []
 
     async def list_cdr(self, limit: int = 200, start_date: Optional[str] = None,
                        end_date: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -159,12 +192,12 @@ class FusionPBXClient:
         paths = []
         if self.custom_paths.get("cdr"):
             paths.append(self.custom_paths["cdr"])
-        paths.extend(["/api/xml_cdr", "/api/cdr", "/app/xml_cdr/api/cdr.php",
-                      "/api/v1/cdr", "/app/xml_cdr/xml_cdr.php"])
+        paths.extend(["/app/api/xml_cdr", "/api/xml_cdr", "/api/cdr",
+                      "/app/xml_cdr/api/cdr.php", "/api/v1/cdr"])
         last_err = None
         for path in paths:
             try:
-                data = await self._request("GET", path, params=params)
+                data = await self._request("GET", path, params=self._params_for_style(params))
                 if isinstance(data, list): return data
                 if isinstance(data, dict):
                     for k in ("data", "cdr", "items", "rows", "xml_cdr"):
@@ -174,8 +207,7 @@ class FusionPBXClient:
                 last_err = e
                 continue
         raise FusionPBXError(
-            f"Nenhum endpoint REST de CDR encontrado. Configure 'path_cdr'. "
-            f"Último erro: {last_err}"
+            f"Nenhum endpoint REST de CDR encontrado. Configure 'Path CDR'. Último erro: {last_err}"
         )
 
     async def get_recording_url(self, recording_uuid: str) -> str:
