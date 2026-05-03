@@ -1199,7 +1199,6 @@ async def create_charge(body: ChargeCreate, user: dict = Depends(require_super_a
                       {"tenant_id": body.tenant_id, "gateway": body.gateway})
     return _serialize_charge(base_doc)
 
-
 @api.get("/billing/charges")
 async def list_charges(
     user: dict = Depends(require_super_admin()),
@@ -1279,7 +1278,12 @@ async def webhook_asaas(request: Request):
     sent_token = request.headers.get("asaas-access-token") or request.headers.get("Asaas-Access-Token")
     if expected_token and sent_token != expected_token:
         raise HTTPException(status_code=401, detail="Webhook token inválido")
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Corpo JSON inválido")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Esperado um objeto JSON")
     event = body.get("event", "")
     payment = body.get("payment", {}) or {}
     delivery_id = body.get("id") or payment.get("id")
@@ -1306,7 +1310,12 @@ async def webhook_asaas(request: Request):
 @api.post("/webhooks/paypal")
 async def webhook_paypal(request: Request):
     """PayPal sends signed events. We store + try to update charge status."""
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Corpo JSON inválido")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Esperado um objeto JSON")
     event_type = body.get("event_type", "")
     resource = body.get("resource", {}) or {}
     delivery_id = body.get("id")
