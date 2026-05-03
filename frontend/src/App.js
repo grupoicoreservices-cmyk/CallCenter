@@ -37,10 +37,10 @@ function App() {
             <Route path="/tv" element={<ProtectedRoute><TvPanel /></ProtectedRoute>} />
             <Route path="/users" element={<ProtectedRoute><Users /></ProtectedRoute>} />
             <Route path="/audit" element={<ProtectedRoute><AuditLogs /></ProtectedRoute>} />
-            <Route path="/tenants" element={<ProtectedRoute><Tenants /></ProtectedRoute>} />
-            <Route path="/plans" element={<ProtectedRoute><Plans /></ProtectedRoute>} />
-            <Route path="/billing" element={<ProtectedRoute><BillingSettings /></ProtectedRoute>} />
-            <Route path="/charges" element={<ProtectedRoute><Charges /></ProtectedRoute>} />
+            <Route path="/tenants" element={<ProtectedRoute requireSuperAdmin><Tenants /></ProtectedRoute>} />
+            <Route path="/plans" element={<ProtectedRoute requireSuperAdmin><Plans /></ProtectedRoute>} />
+            <Route path="/billing" element={<ProtectedRoute requireSuperAdmin><BillingSettings /></ProtectedRoute>} />
+            <Route path="/charges" element={<ProtectedRoute requireSuperAdmin><Charges /></ProtectedRoute>} />
             <Route path="/fusionpbx" element={<ProtectedRoute><FusionPBXSettings /></ProtectedRoute>} />
           </Routes>
           <Toaster richColors position="top-right" />
