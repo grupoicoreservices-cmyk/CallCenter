@@ -86,14 +86,14 @@ export default function FusionPBXSettings() {
   }
 
   return (
-    <Layout title="Integração com Central PBX" subtitle="Voxyra CCA · Conecte ao seu servidor de telefonia (FusionPBX/FreeSWITCH) via REST API">
+    <Layout title="Integração com Central PBX" subtitle="Voxyra CCA · Conecte ao seu servidor de telefonia via REST API">
       <div className="border border-blue-200 bg-blue-50 rounded-sm p-4 mb-4 flex items-start gap-3">
         <AlertCircle size={16} className="text-blue-600 mt-0.5" />
         <div className="text-xs text-blue-900">
           <strong>Como funciona:</strong> O Voxyra CCA tenta endpoints REST padrão da comunidade
           (<code className="font-mono bg-white px-1">/api/extensions</code>, <code className="font-mono bg-white px-1">/api/call_center_queues</code>, <code className="font-mono bg-white px-1">/api/xml_cdr</code>).
-          Caso seu servidor FusionPBX free não exponha REST nativamente, você pode instalar o módulo <a href="https://github.com/codemonkey76/fusionapi" target="_blank" rel="noreferrer" className="underline">fusionapi</a> ou
-          adicionar scripts PHP customizados. Use a aba <strong>Testar Conexão</strong> antes de sincronizar.
+          Caso seu servidor PBX não exponha REST nativamente, instale um módulo de API REST ou
+          adicione scripts customizados. Use a aba <strong>Testar Conexão</strong> antes de sincronizar.
         </div>
       </div>
 
@@ -111,7 +111,7 @@ export default function FusionPBXSettings() {
             </label>
           </div>
 
-          <div><Label>URL Base do FusionPBX</Label>
+          <div><Label>URL Base do servidor</Label>
             <Input value={form.base_url} onChange={(e) => setForm({ ...form, base_url: e.target.value })}
                    placeholder="https://pbx.empresa.com.br" data-testid="fpbx-url" />
             <div className="text-[10px] text-muted-foreground mt-1">URL pública (https). Sem barra final.</div>
