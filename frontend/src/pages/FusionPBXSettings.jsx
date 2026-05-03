@@ -69,7 +69,7 @@ export default function FusionPBXSettings() {
     setSyncing(true);
     setLastSync(null);
     try {
-      const { data } = await api.post("/fusionpbx/sync");
+      const { data } = await api.post(`/fusionpbx/sync${qs}`);
       setLastSync(data);
       if (data.status === "ok") {
         toast.success(`Sincronizado: ${data.agents_synced} agentes, ${data.queues_synced} filas, ${data.calls_synced} chamadas`);
@@ -79,6 +79,19 @@ export default function FusionPBXSettings() {
       load();
     } catch (e) { toast.error(formatApiError(e.response?.data?.detail) || "Erro"); }
     finally { setSyncing(false); }
+  }
+
+  async function clearDemo() {
+    if (!window.confirm(
+      "Deseja REMOVER todos os dados simulados (agentes, filas, chamadas e gravações de demonstração)?\n\n" +
+      "Os dados reais sincronizados da sua Central PBX NÃO serão afetados.\n\n" +
+      "Esta ação não pode ser desfeita."
+    )) return;
+    try {
+      const { data } = await api.post(`/fusionpbx/clear-demo-data${qs}`);
+      const total = Object.values(data.deleted || {}).reduce((a, b) => a + b, 0);
+      toast.success(`${total} registros simulados removidos (${data.deleted.agents} agentes · ${data.deleted.queues} filas · ${data.deleted.calls} chamadas · ${data.deleted.recordings} gravações)`);
+    } catch (e) { toast.error(formatApiError(e.response?.data?.detail) || "Erro"); }
   }
 
   if (user?.role !== "super_admin" && user?.role !== "admin") {
