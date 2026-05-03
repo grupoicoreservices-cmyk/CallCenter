@@ -1413,6 +1413,9 @@ _UPDATE_STATE: Dict[str, Any] = {"running": False, "log": [], "started_at": None
 APP_ROOT = Path("/opt/CallCenter")
 FRONTEND_BUILD = APP_ROOT / "frontend" / "build"
 
+# Application version - manually incremented on each release
+APP_VERSION = "V3.0 R123"
+
 
 def _get_build_version() -> str:
     """Returns a unique identifier of the current frontend build.
@@ -1440,7 +1443,7 @@ def _get_build_version() -> str:
 @api.get("/system/version")
 async def system_version():
     """Public endpoint so any authenticated client can detect updates."""
-    return {"build": _get_build_version()}
+    return {"build": _get_build_version(), "version": APP_VERSION}
 
 
 def _get_git_info() -> Dict[str, Any]:
@@ -1583,7 +1586,8 @@ async def system_info(user: dict = Depends(require_super_admin())):
     """Returns git/version info for the update panel."""
     git = _get_git_info()
     return {
-        "app_version": "Voxyra CCA",
+        "app_version": APP_VERSION,
+        "app_name": "Voxyra CCA",
         "app_dir": str(APP_ROOT),
         "git": git,
         "update_state": {k: _UPDATE_STATE.get(k) for k in ("running", "started_at", "finished_at", "success")},

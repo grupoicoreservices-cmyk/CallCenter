@@ -1,8 +1,10 @@
 import { NavLink, useNavigate } from "react-router-dom";
+import { useEffect, useState } from "react";
 import {
   LayoutDashboard, PhoneCall, Disc3, BarChart3, Users, UserCog, LogOut, Headphones,
   Tv2, ShieldCheck, History, Building2, X, Sparkles, CreditCard, Receipt, Server, Download,
 } from "lucide-react";
+import { api } from "../lib/api";
 import { useAuth } from "../contexts/AuthContext";
 
 const ITEMS = [
@@ -21,6 +23,11 @@ export default function Sidebar() {
   const { user, logout, hasPermission, tenantContext, setTenantContext } = useAuth();
   const navigate = useNavigate();
   const isSuper = user?.role === "super_admin";
+  const [appVersion, setAppVersion] = useState(null);
+
+  useEffect(() => {
+    api.get("/system/version").then(r => setAppVersion(r.data.version)).catch(() => {});
+  }, []);
 
   const visibleItems = ITEMS.filter((it) => !it.perm || hasPermission(it.perm));
   const tenantName = user?.tenant?.name;
@@ -118,6 +125,12 @@ export default function Sidebar() {
             <LogOut size={15} />
           </button>
         </div>
+        {appVersion && (
+          <div className="px-3 py-2 border-t border-zinc-800 text-[10px] text-zinc-500 font-mono flex items-center justify-between" data-testid="app-version">
+            <span>Voxyra CCA</span>
+            <span className="text-zinc-400">{appVersion}</span>
+          </div>
+        )}
       </div>
     </aside>
   );

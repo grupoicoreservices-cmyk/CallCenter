@@ -110,7 +110,7 @@ export default function SystemUpdate() {
   const hasUpdates = git.has_updates;
 
   return (
-    <Layout title="Atualizações do Sistema" subtitle="Voxyra CCA · Atualize a plataforma via interface web">
+    <Layout title="Atualizações do Sistema" subtitle={info?.app_version ? `Voxyra CCA · ${info.app_version}` : "Voxyra CCA · Atualize a plataforma via interface web"}>
       {loading ? (
         <div className="text-center text-muted-foreground py-8 font-mono text-sm">carregando…</div>
       ) : (
