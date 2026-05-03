@@ -83,11 +83,11 @@ export default function Sidebar() {
             </NavLink>
           </>
         )}
-        {/* FusionPBX integration: super admin (when in tenant context) and admins */}
+        {/* PBX integration: super admin (when in tenant context) and admins */}
         {(isSuper && tenantContext) || user?.role === "admin" ? (
           <NavLink to="/fusionpbx" end data-testid="nav-fusionpbx"
             className={({ isActive }) => `sidebar-item flex items-center gap-3 px-3 py-2 text-sm text-zinc-300 border-l-2 border-transparent rounded-r-sm ${isActive ? "active" : ""}`}>
-            <Server size={16} strokeWidth={1.8} /><span>FusionPBX</span>
+            <Server size={16} strokeWidth={1.8} /><span>Central PBX</span>
           </NavLink>
         ) : null}
         {/* Regular nav (only when in tenant context or for tenant users) */}

@@ -75,7 +75,7 @@ export default function Tenants() {
   return (
     <Layout
       title="Tenants"
-      subtitle="Empresas hospedadas na plataforma — multi-tenancy estilo FusionPBX"
+      subtitle="Empresas hospedadas na plataforma Voxyra CCA — multi-tenancy nativo"
       actions={
         <Button onClick={() => setEditing("new")} data-testid="btn-new-tenant">
           <Plus size={14} className="mr-1.5" /> Novo Tenant
@@ -252,7 +252,7 @@ function TenantFormDialog({ open, editing, onClose, onSaved }) {
         {/* Identidade */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           <div className="space-y-1.5 md:col-span-2">
-            <Label>Domínio (FusionPBX)</Label>
+            <Label>Domínio do tenant</Label>
             <Input value={form.domain} onChange={(e) => setForm({ ...form, domain: e.target.value })} disabled={!isNew} placeholder="empresa.com.br" data-testid="tf-domain" />
           </div>
           <div className="space-y-1.5 md:col-span-2"><Label>Nome da empresa</Label>

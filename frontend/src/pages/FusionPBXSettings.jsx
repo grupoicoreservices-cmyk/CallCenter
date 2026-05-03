@@ -79,21 +79,21 @@ export default function FusionPBXSettings() {
   }
 
   if (user?.role !== "super_admin" && user?.role !== "admin") {
-    return <Layout title="FusionPBX"><div className="border border-border bg-card rounded-sm p-12 text-center">
+    return <Layout title="Central PBX"><div className="border border-border bg-card rounded-sm p-12 text-center">
       <Server size={32} className="mx-auto text-muted-foreground mb-3" />
       <h3 className="font-display text-lg font-semibold">Acesso restrito</h3>
     </div></Layout>;
   }
 
   return (
-    <Layout title="Integração FusionPBX" subtitle="Conecte ao seu servidor FusionPBX/FreeSWITCH via REST API">
+    <Layout title="Integração com Central PBX" subtitle="Voxyra CCA · Conecte ao seu servidor de telefonia (FusionPBX/FreeSWITCH) via REST API">
       <div className="border border-blue-200 bg-blue-50 rounded-sm p-4 mb-4 flex items-start gap-3">
         <AlertCircle size={16} className="text-blue-600 mt-0.5" />
         <div className="text-xs text-blue-900">
-          <strong>Como funciona:</strong> A integração tenta endpoints REST padrão da comunidade
+          <strong>Como funciona:</strong> O Voxyra CCA tenta endpoints REST padrão da comunidade
           (<code className="font-mono bg-white px-1">/api/extensions</code>, <code className="font-mono bg-white px-1">/api/call_center_queues</code>, <code className="font-mono bg-white px-1">/api/xml_cdr</code>).
-          Em FusionPBX free, você pode precisar instalar o módulo <a href="https://github.com/codemonkey76/fusionapi" target="_blank" rel="noreferrer" className="underline">fusionapi</a> ou
-          adicionar scripts PHP customizados no seu servidor. Use a aba <strong>Testar Conexão</strong> antes de sincronizar.
+          Caso seu servidor FusionPBX free não exponha REST nativamente, você pode instalar o módulo <a href="https://github.com/codemonkey76/fusionapi" target="_blank" rel="noreferrer" className="underline">fusionapi</a> ou
+          adicionar scripts PHP customizados. Use a aba <strong>Testar Conexão</strong> antes de sincronizar.
         </div>
       </div>
 
@@ -103,7 +103,7 @@ export default function FusionPBXSettings() {
           <div className="flex items-center justify-between border-b border-border pb-3">
             <div className="flex items-center gap-2">
               <Phone size={16} className="text-emerald-600" />
-              <h3 className="font-display text-lg font-semibold">Servidor FusionPBX</h3>
+              <h3 className="font-display text-lg font-semibold">Servidor PBX</h3>
             </div>
             <label className="flex items-center gap-2 text-sm">
               <Switch checked={form.enabled} onCheckedChange={(v) => setForm({ ...form, enabled: v })} data-testid="fpbx-enabled" />
