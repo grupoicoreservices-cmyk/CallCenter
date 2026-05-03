@@ -92,43 +92,16 @@ fi
 npm install -g yarn --silent
 ok "Node $(node --version) · Yarn $(yarn --version)"
 
-# -------- 3. Python (3.11 em 22.04, 3.12 em 24.04) --------
-PY_BIN=""
-if command -v python3.12 &>/dev/null; then
-    PY_BIN="python3.12"
-    log "Python 3.12 já instalado"
-elif command -v python3.11 &>/dev/null; then
-    PY_BIN="python3.11"
-    log "Python 3.11 já instalado"
-else
-    log "Instalando Python (3.12 nativo ou 3.11 via PPA)..."
-    UBUNTU_VER=$(lsb_release -rs | cut -d. -f1)
-    if [ "$UBUNTU_VER" -ge 24 ]; then
-        # Ubuntu 24.04+ tem python3.12 no repositório padrão
-        apt-get install -y -qq python3.12 python3.12-venv python3.12-dev python3-pip || \
-        apt-get install -y -qq python3 python3-venv python3-dev python3-pip
-        PY_BIN=$(command -v python3.12 || command -v python3)
-    else
-        # Ubuntu 22.04: usar PPA deadsnakes para 3.11
-        add-apt-repository -y ppa:deadsnakes/ppa >/dev/null 2>&1 || \
-            warn "Falha ao adicionar PPA deadsnakes. Tentando pacotes padrão."
-        apt-get update -qq
-        if apt-get install -y -qq python3.11 python3.11-venv python3.11-dev 2>/dev/null; then
-            PY_BIN="python3.11"
-        else
-            warn "Python 3.11 não disponível. Usando python3 do sistema."
-            apt-get install -y -qq python3 python3-venv python3-dev python3-pip
-            PY_BIN="python3"
-        fi
-    fi
-fi
-[ -z "$PY_BIN" ] && die "Nenhum Python 3 disponível no sistema"
+# -------- 3. Python 3 (usa a versão nativa do Ubuntu) --------
+log "Instalando Python 3 (versão nativa do sistema)..."
+apt-get install -y python3 python3-venv python3-dev python3-pip
+PY_BIN="python3"
 PY_VERSION=$("$PY_BIN" --version 2>&1)
-ok "$PY_VERSION ($PY_BIN)"
+ok "$PY_VERSION"
 
-# Garantir que o pacote venv esteja disponível para a versão detectada
+# Garantir que o pacote venv específico da versão detectada esteja disponível
 PY_MINOR=$("$PY_BIN" -c "import sys;print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-apt-get install -y -qq "python${PY_MINOR}-venv" "python${PY_MINOR}-dev" 2>/dev/null || true
+apt-get install -y "python${PY_MINOR}-venv" "python${PY_MINOR}-dev" 2>/dev/null || true
 
 # -------- 4. MongoDB 7 --------
 if ! systemctl is-active --quiet mongod 2>/dev/null; then
