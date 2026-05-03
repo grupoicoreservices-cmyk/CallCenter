@@ -17,6 +17,9 @@ export default function FusionPBXSettings() {
   // Super admin precisa estar em contexto de tenant. Tenant admin usa o seu próprio.
   const activeTenantId = user?.role === "super_admin" ? tenantContext : user?.tenant_id;
   const qs = activeTenantId ? `?tenant_id=${activeTenantId}` : "";
+  const [tab, setTab] = useState("config"); // config | diag
+  const [diag, setDiag] = useState(null);
+  const [diagLoading, setDiagLoading] = useState(false);
   const [form, setForm] = useState({
     enabled: false, base_url: "", api_key: "", username: "", password: "",
     domain_uuid: "", domain_name: "", verify_ssl: true, sync_interval_minutes: 1,
