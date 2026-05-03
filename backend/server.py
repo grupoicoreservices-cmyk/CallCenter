@@ -1688,6 +1688,65 @@ async def fusion_clear_demo_data(user: dict = Depends(get_current_user), tenant_
     return {"ok": True, "deleted": deleted, "tenant_id": tid}
 
 
+@api.get("/fusionpbx/diagnostics")
+async def fusion_diagnostics(user: dict = Depends(get_current_user), tenant_id: Optional[str] = None):
+    """Returns comprehensive status: settings, last sync, counts of real vs demo data,
+    and the latest synced records so the admin can verify data is coming in."""
+    tid = await _resolve_tenant_for_fusion(user, tenant_id)
+    if user.get("role") not in ("super_admin", "admin"):
+        raise HTTPException(status_code=403, detail="Sem permissão")
+
+    settings = await db.fusionpbx_settings.find_one({"tenant_id": tid}, {"_id": 0}) or {}
+
+    async def _count_real_vs_demo(col: str) -> Dict[str, int]:
+        real = await db[col].count_documents({"tenant_id": tid, "external_id": {"$exists": True, "$ne": None}})
+        demo = await db[col].count_documents({"tenant_id": tid, "$or": [{"external_id": {"$exists": False}}, {"external_id": None}]})
+        return {"real": real, "demo": demo, "total": real + demo}
+
+    counts = {
+        "agents": await _count_real_vs_demo("agents"),
+        "queues": await _count_real_vs_demo("queues"),
+        "calls": await _count_real_vs_demo("calls"),
+        "recordings": await _count_real_vs_demo("recordings"),
+    }
+
+    # Last 10 synced calls, 10 agents, 50 queues
+    recent_real_calls = await db.calls.find(
+        {"tenant_id": tid, "external_id": {"$exists": True, "$ne": None}}, {"_id": 0}
+    ).sort("started_at", -1).to_list(10)
+    recent_real_agents = await db.agents.find(
+        {"tenant_id": tid, "external_id": {"$exists": True, "$ne": None}}, {"_id": 0}
+    ).sort("updated_at", -1).to_list(10)
+    recent_real_queues = await db.queues.find(
+        {"tenant_id": tid, "external_id": {"$exists": True, "$ne": None}}, {"_id": 0}
+    ).to_list(50)
+
+    # Audit log of recent syncs
+    sync_history = await db.audit_logs.find(
+        {"tenant_id": tid, "resource": "fusionpbx", "action": "sync"}, {"_id": 0}
+    ).sort("created_at", -1).to_list(5)
+
+    return {
+        "tenant_id": tid,
+        "settings": {
+            "enabled": settings.get("enabled", False),
+            "configured": bool(settings.get("base_url")),
+            "base_url": settings.get("base_url"),
+            "domain_uuid": settings.get("domain_uuid"),
+            "domain_name": settings.get("domain_name"),
+            "last_sync_at": settings.get("last_sync_at"),
+            "last_sync_status": settings.get("last_sync_status"),
+            "last_sync_summary": settings.get("last_sync_summary", {}),
+        },
+        "counts": counts,
+        "recent_calls": recent_real_calls,
+        "recent_agents": recent_real_agents,
+        "recent_queues": recent_real_queues,
+        "sync_history": sync_history,
+    }
+
+
+
 @api.post("/fusionpbx/sync")
 async def fusion_sync(user: dict = Depends(get_current_user), tenant_id: Optional[str] = None,
                       cdr_limit: int = 200):
