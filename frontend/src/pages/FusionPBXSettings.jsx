@@ -10,7 +10,10 @@ import { toast } from "sonner";
 import { useAuth } from "../contexts/AuthContext";
 
 export default function FusionPBXSettings() {
-  const { user } = useAuth();
+  const { user, tenantContext } = useAuth();
+  // Super admin precisa estar em contexto de tenant. Tenant admin usa o seu próprio.
+  const activeTenantId = user?.role === "super_admin" ? tenantContext : user?.tenant_id;
+  const qs = activeTenantId ? `?tenant_id=${activeTenantId}` : "";
   const [form, setForm] = useState({
     enabled: false, base_url: "", api_key: "", username: "", password: "",
     domain_uuid: "", domain_name: "", verify_ssl: true, sync_interval_minutes: 5,
@@ -23,7 +26,7 @@ export default function FusionPBXSettings() {
 
   async function load() {
     try {
-      const { data } = await api.get("/fusionpbx/settings");
+      const { data } = await api.get(`/fusionpbx/settings${qs}`);
       setForm({
         enabled: !!data.enabled, base_url: data.base_url || "",
         api_key: "", username: data.username || "", password: "",
@@ -46,7 +49,7 @@ export default function FusionPBXSettings() {
       // Only send secrets if user typed something
       if (!payload.api_key) delete payload.api_key;
       if (!payload.password) delete payload.password;
-      await api.put("/fusionpbx/settings", payload);
+      await api.put(`/fusionpbx/settings${qs}`, payload);
       toast.success("Configuração salva");
       load();
     } catch (e) { toast.error(formatApiError(e.response?.data?.detail) || "Erro"); }
@@ -56,7 +59,7 @@ export default function FusionPBXSettings() {
   async function test() {
     setTesting(true);
     try {
-      const { data } = await api.post("/fusionpbx/test");
+      const { data } = await api.post(`/fusionpbx/test${qs}`);
       toast.success("Conexão OK · " + (data.status_code ? `HTTP ${data.status_code}` : "respondeu"));
     } catch (e) { toast.error(formatApiError(e.response?.data?.detail) || "Falha"); }
     finally { setTesting(false); }
@@ -82,6 +85,15 @@ export default function FusionPBXSettings() {
     return <Layout title="Central PBX"><div className="border border-border bg-card rounded-sm p-12 text-center">
       <Server size={32} className="mx-auto text-muted-foreground mb-3" />
       <h3 className="font-display text-lg font-semibold">Acesso restrito</h3>
+    </div></Layout>;
+  }
+
+  if (user?.role === "super_admin" && !tenantContext) {
+    return <Layout title="Central PBX"><div className="border border-amber-200 bg-amber-50 rounded-sm p-12 text-center">
+      <Server size={32} className="mx-auto text-amber-600 mb-3" />
+      <h3 className="font-display text-lg font-semibold">Selecione um tenant</h3>
+      <p className="text-sm text-muted-foreground mt-2">Você precisa entrar no contexto de um tenant antes de configurar a Central PBX.</p>
+      <a href="/tenants" className="inline-block mt-4 text-sm underline">Ir para Tenants →</a>
     </div></Layout>;
   }
 

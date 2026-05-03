@@ -1374,9 +1374,11 @@ def _serialize_fusion_settings(s: Optional[dict], mask: bool = True) -> dict:
 
 async def _resolve_tenant_for_fusion(user: dict, tenant_id: Optional[str]) -> str:
     if user.get("role") == "super_admin":
-        if not tenant_id:
-            raise HTTPException(status_code=400, detail="tenant_id obrigatório para super-admin")
-        return tenant_id
+        # Accept explicit ?tenant_id=... OR the X-Tenant-Context header (impersonation)
+        tid = tenant_id or user.get("_tenant_context")
+        if not tid:
+            raise HTTPException(status_code=400, detail="Selecione um tenant antes de configurar a central PBX (entre no tenant via página Tenants)")
+        return tid
     return user["tenant_id"]
 
 

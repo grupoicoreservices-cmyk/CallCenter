@@ -127,20 +127,6 @@ export default function Login() {
                   className="mt-6 w-full flex items-center justify-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors">
             <Shield size={12} /> {superMode ? "Voltar ao login normal" : "Acesso Super Admin"}
           </button>
-
-          <div className="mt-6 text-xs text-muted-foreground border-t border-border pt-5 space-y-1">
-            <div className="uppercase tracking-widest text-[10px] font-medium mb-2">Credenciais demo</div>
-            {superMode ? (
-              <div className="font-mono">root@voxyra.io / root123</div>
-            ) : (
-              <>
-                <div className="font-mono"><b>empresa-a.local</b> · admin@empresa-a.local / admin123</div>
-                <div className="font-mono"><b>empresa-b.local</b> · admin@empresa-b.local / admin123</div>
-                <div className="font-mono">supervisor@... / super123</div>
-                <div className="font-mono">agent@... / agent123</div>
-              </>
-            )}
-          </div>
         </div>
       </div>
     </div>
