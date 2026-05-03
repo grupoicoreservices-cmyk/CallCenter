@@ -260,15 +260,26 @@ server {
         proxy_set_header Host \$host;
     }
 
-    # Frontend SPA
+    # Frontend SPA - index.html NEVER cached (garante detecção de novas versões)
+    location = / {
+        root $APP_DIR/frontend/build;
+        try_files /index.html =404;
+        add_header Cache-Control "no-store, no-cache, must-revalidate";
+        expires 0;
+    }
+    location = /index.html {
+        root $APP_DIR/frontend/build;
+        add_header Cache-Control "no-store, no-cache, must-revalidate";
+        expires 0;
+    }
     location / {
         try_files \$uri \$uri/ /index.html;
     }
 
-    # Cache assets
+    # Cache estáticos com hash (imutáveis — hash muda ao rebuildar)
     location ~* \.(js|css|png|jpg|jpeg|gif|svg|woff2?|ico)$ {
         expires 30d;
-        add_header Cache-Control "public, no-transform";
+        add_header Cache-Control "public, no-transform, immutable";
     }
 
     gzip on;

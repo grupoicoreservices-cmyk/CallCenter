@@ -1576,9 +1576,36 @@ async def _run_update_task():
             timeout=600,
         )
         if rc != 0: _UPDATE_STATE["success"] = False; return
-        # yarn install + build
-        rc = await run_cmd(f"cd {APP_ROOT}/frontend && yarn install --silent && yarn build", timeout=900)
+        # yarn install in place (doesn't affect the running frontend)
+        rc = await run_cmd(f"cd {APP_ROOT}/frontend && yarn install --silent", timeout=600)
         if rc != 0: _UPDATE_STATE["success"] = False; return
+        # ATOMIC BUILD: build to temporary BUILD_DIR then swap
+        # This prevents the user's browser from seeing a partial/deleted build/ folder
+        build_old = APP_ROOT / "frontend" / "build"
+        build_new = APP_ROOT / "frontend" / "build.new"
+        build_backup = APP_ROOT / "frontend" / "build.old"
+        append("🏗️  Fazendo build em pasta temporária (build.new)...")
+        await run_cmd(f"rm -rf {build_new} {build_backup}", timeout=30)
+        rc = await run_cmd(
+            f"cd {APP_ROOT}/frontend && BUILD_PATH=./build.new yarn build",
+            timeout=900,
+        )
+        if rc != 0:
+            append("❌ Build falhou. O frontend atual permanece intocado.")
+            await run_cmd(f"rm -rf {build_new}", timeout=30)
+            _UPDATE_STATE["success"] = False; return
+        # Validate build.new has index.html and static/js
+        if not (build_new / "index.html").exists():
+            append("❌ Build gerado está incompleto (sem index.html). Abortando swap.")
+            await run_cmd(f"rm -rf {build_new}", timeout=30)
+            _UPDATE_STATE["success"] = False; return
+        # Atomic swap: mv build -> build.old, mv build.new -> build
+        append("🔀 Swap atômico: build.new → build")
+        if build_old.exists():
+            await run_cmd(f"mv {build_old} {build_backup}", timeout=10)
+        await run_cmd(f"mv {build_new} {build_old}", timeout=10)
+        # Clean old backup after successful swap
+        await run_cmd(f"rm -rf {build_backup}", timeout=30)
         append("")
         append("✅ Código atualizado com sucesso!")
         append("🔄 Reiniciando backend via supervisor…")
