@@ -1379,13 +1379,19 @@ class FusionPBXSettings(BaseModel):
     domain_uuid: Optional[str] = None
     domain_name: Optional[str] = None
     verify_ssl: bool = True
-    sync_interval_minutes: int = 5
+    sync_interval_minutes: int = 1
+    # Custom REST paths for personalized FusionPBX installations
+    path_extensions: Optional[str] = None
+    path_queues: Optional[str] = None
+    path_agents: Optional[str] = None
+    path_cdr: Optional[str] = None
 
 
 def _serialize_fusion_settings(s: Optional[dict], mask: bool = True) -> dict:
     if not s: return {"enabled": False, "configured": False}
     out = {k: s.get(k) for k in ["enabled", "base_url", "username", "domain_uuid", "domain_name",
-                                  "verify_ssl", "sync_interval_minutes", "last_sync_at", "last_sync_status"]}
+                                  "verify_ssl", "sync_interval_minutes", "last_sync_at", "last_sync_status",
+                                  "path_extensions", "path_queues", "path_agents", "path_cdr"]}
     out["configured"] = bool(s.get("base_url"))
     out["api_key_set"] = bool(s.get("api_key"))
     out["password_set"] = bool(s.get("password"))
@@ -1414,7 +1420,7 @@ APP_ROOT = Path("/opt/CallCenter")
 FRONTEND_BUILD = APP_ROOT / "frontend" / "build"
 
 # Application version - manually incremented on each release
-APP_VERSION = "V3.0 R123"
+APP_VERSION = "V3.0 R124"
 
 
 def _get_build_version() -> str:
@@ -1777,11 +1783,16 @@ async def _build_fusion_client(tid: str) -> FusionPBXClient:
         raise HTTPException(status_code=400, detail="FusionPBX não configurado para este tenant")
     if not s.get("enabled", False):
         raise HTTPException(status_code=400, detail="Integração FusionPBX desativada")
+    custom_paths = {}
+    for key in ("path_extensions", "path_queues", "path_agents", "path_cdr"):
+        if s.get(key):
+            custom_paths[key.replace("path_", "")] = s[key]
     return FusionPBXClient(
         base_url=s["base_url"], api_key=s.get("api_key"),
         username=s.get("username"), password=s.get("password"),
         domain_uuid=s.get("domain_uuid"), domain_name=s.get("domain_name"),
         verify_ssl=bool(s.get("verify_ssl", True)),
+        custom_paths=custom_paths,
     )
 
 
@@ -1830,11 +1841,13 @@ async def _run_sync_for_tenant(tid: str, cdr_limit: int = 200) -> Dict[str, Any]
     s = await db.fusionpbx_settings.find_one({"tenant_id": tid})
     if not s or not s.get("enabled") or not s.get("base_url"):
         return {"skipped": True, "reason": "not_enabled"}
+    custom_paths = {k.replace("path_", ""): s[k] for k in ("path_extensions", "path_queues", "path_agents", "path_cdr") if s.get(k)}
     client = FusionPBXClient(
         base_url=s["base_url"], api_key=s.get("api_key"),
         username=s.get("username"), password=s.get("password"),
         domain_uuid=s.get("domain_uuid"), domain_name=s.get("domain_name"),
         verify_ssl=bool(s.get("verify_ssl", True)),
+        custom_paths=custom_paths,
     )
     summary = {"agents_synced": 0, "queues_synced": 0, "calls_synced": 0,
                "errors": [], "started_at": datetime.now(timezone.utc).isoformat()}

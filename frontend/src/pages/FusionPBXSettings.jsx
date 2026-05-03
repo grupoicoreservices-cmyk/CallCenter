@@ -23,6 +23,7 @@ export default function FusionPBXSettings() {
   const [form, setForm] = useState({
     enabled: false, base_url: "", api_key: "", username: "", password: "",
     domain_uuid: "", domain_name: "", verify_ssl: true, sync_interval_minutes: 1,
+    path_extensions: "", path_queues: "", path_agents: "", path_cdr: "",
   });
   const [meta, setMeta] = useState({});
   const [saving, setSaving] = useState(false);
@@ -39,6 +40,10 @@ export default function FusionPBXSettings() {
         domain_uuid: data.domain_uuid || "", domain_name: data.domain_name || "",
         verify_ssl: data.verify_ssl !== false,
         sync_interval_minutes: data.sync_interval_minutes || 1,
+        path_extensions: data.path_extensions || "",
+        path_queues: data.path_queues || "",
+        path_agents: data.path_agents || "",
+        path_cdr: data.path_cdr || "",
       });
       setMeta({
         configured: data.configured, api_key_set: data.api_key_set, password_set: data.password_set,
@@ -223,6 +228,43 @@ export default function FusionPBXSettings() {
             <div><Label>Intervalo Sync (min)</Label>
               <Input type="number" min={1} value={form.sync_interval_minutes}
                      onChange={(e) => setForm({ ...form, sync_interval_minutes: parseInt(e.target.value) || 1 })} />
+            </div>
+          </div>
+
+          {/* Endpoints REST customizados (para FusionPBX personalizado) */}
+          <div className="border border-amber-200 bg-amber-50 rounded-sm p-3 space-y-2">
+            <div className="flex items-center gap-2 text-xs font-medium text-amber-900">
+              <Settings2 size={12} />
+              Endpoints REST customizados <span className="font-normal text-[10px] text-muted-foreground">(opcional · se seu FusionPBX não usar os paths padrão)</span>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <Label className="text-[10px]">Path Extensions/Ramais</Label>
+                <Input value={form.path_extensions}
+                  onChange={(e) => setForm({ ...form, path_extensions: e.target.value })}
+                  placeholder="/app/extensions/api.php" className="font-mono text-xs" data-testid="fpbx-path-ext" />
+              </div>
+              <div>
+                <Label className="text-[10px]">Path Queues/Filas</Label>
+                <Input value={form.path_queues}
+                  onChange={(e) => setForm({ ...form, path_queues: e.target.value })}
+                  placeholder="/app/call_center/api.php" className="font-mono text-xs" data-testid="fpbx-path-queues" />
+              </div>
+              <div>
+                <Label className="text-[10px]">Path Agents</Label>
+                <Input value={form.path_agents}
+                  onChange={(e) => setForm({ ...form, path_agents: e.target.value })}
+                  placeholder="(opcional, usa Extensions se vazio)" className="font-mono text-xs" data-testid="fpbx-path-agents" />
+              </div>
+              <div>
+                <Label className="text-[10px]">Path CDR/Chamadas</Label>
+                <Input value={form.path_cdr}
+                  onChange={(e) => setForm({ ...form, path_cdr: e.target.value })}
+                  placeholder="/app/xml_cdr/api.php" className="font-mono text-xs" data-testid="fpbx-path-cdr" />
+              </div>
+            </div>
+            <div className="text-[10px] text-amber-800 mt-1">
+              Dica: aponte para seus scripts PHP que retornam JSON. Exemplo de script: <code className="font-mono bg-white px-1">SELECT * FROM v_extensions WHERE domain_uuid='UUID'</code> encoded como JSON.
             </div>
           </div>
 

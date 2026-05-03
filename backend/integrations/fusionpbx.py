@@ -26,7 +26,8 @@ class FusionPBXClient:
     def __init__(self, base_url: str, api_key: Optional[str] = None,
                  username: Optional[str] = None, password: Optional[str] = None,
                  domain_uuid: Optional[str] = None, domain_name: Optional[str] = None,
-                 verify_ssl: bool = True):
+                 verify_ssl: bool = True,
+                 custom_paths: Optional[Dict[str, str]] = None):
         if not base_url:
             raise FusionPBXError("base_url do FusionPBX não configurado")
         self.base_url = base_url.rstrip("/")
@@ -36,6 +37,7 @@ class FusionPBXClient:
         self.domain_uuid = domain_uuid
         self.domain_name = domain_name
         self.verify_ssl = verify_ssl
+        self.custom_paths = custom_paths or {}
         self.timeout = httpx.Timeout(30.0)
 
     def _auth(self):
@@ -79,39 +81,65 @@ class FusionPBXClient:
                 raise FusionPBXError(f"Servidor inacessível: {e}") from e
 
     async def list_extensions(self) -> List[Dict[str, Any]]:
-        """Try common endpoints used by community fusionapi scripts."""
+        """Try custom path first, then common endpoints used by community scripts."""
         params = {}
         if self.domain_uuid: params["domain_uuid"] = self.domain_uuid
-        for path in ("/api/extensions", "/app/extensions/api/extensions.php", "/api/v1/extensions"):
+        paths = []
+        if self.custom_paths.get("extensions"):
+            paths.append(self.custom_paths["extensions"])
+        paths.extend(["/api/extensions", "/app/extensions/api/extensions.php",
+                      "/api/v1/extensions", "/api/user", "/app/users/api/users.php"])
+        last_err = None
+        for path in paths:
             try:
                 data = await self._request("GET", path, params=params)
                 if isinstance(data, list): return data
                 if isinstance(data, dict):
-                    for k in ("data", "extensions", "items", "rows"):
+                    for k in ("data", "extensions", "items", "rows", "users"):
                         if k in data and isinstance(data[k], list): return data[k]
-                    return [data] if data else []
-            except FusionPBXError:
+                    if data: return [data]
+            except FusionPBXError as e:
+                last_err = e
                 continue
-        raise FusionPBXError("Nenhum endpoint REST de extensions encontrado. Configure um endpoint custom.")
+        raise FusionPBXError(
+            f"Nenhum endpoint REST de extensions encontrado. Configure 'path_extensions' nas configurações "
+            f"(ex: /app/extensions/my_api.php). Último erro: {last_err}"
+        )
 
     async def list_call_center_queues(self) -> List[Dict[str, Any]]:
         params = {}
         if self.domain_uuid: params["domain_uuid"] = self.domain_uuid
-        for path in ("/api/call_center_queues", "/app/call_center/api/queues.php", "/api/v1/call_center/queues"):
+        paths = []
+        if self.custom_paths.get("queues"):
+            paths.append(self.custom_paths["queues"])
+        paths.extend(["/api/call_center_queues", "/app/call_center/api/queues.php",
+                      "/api/v1/call_center/queues", "/app/ring_groups/api/ring_groups.php"])
+        last_err = None
+        for path in paths:
             try:
                 data = await self._request("GET", path, params=params)
                 if isinstance(data, list): return data
                 if isinstance(data, dict):
-                    for k in ("data", "queues", "items", "rows"):
+                    for k in ("data", "queues", "items", "rows", "call_center_queues"):
                         if k in data and isinstance(data[k], list): return data[k]
-            except FusionPBXError:
+                    if data: return [data]
+            except FusionPBXError as e:
+                last_err = e
                 continue
-        raise FusionPBXError("Nenhum endpoint REST de queues encontrado.")
+        raise FusionPBXError(
+            f"Nenhum endpoint REST de queues encontrado. Configure 'path_queues'. "
+            f"Último erro: {last_err}"
+        )
 
     async def list_call_center_agents(self) -> List[Dict[str, Any]]:
         params = {}
         if self.domain_uuid: params["domain_uuid"] = self.domain_uuid
-        for path in ("/api/call_center_agents", "/app/call_center/api/agents.php", "/api/v1/call_center/agents"):
+        paths = []
+        if self.custom_paths.get("agents"):
+            paths.append(self.custom_paths["agents"])
+        paths.extend(["/api/call_center_agents", "/app/call_center/api/agents.php",
+                      "/api/v1/call_center/agents"])
+        for path in paths:
             try:
                 data = await self._request("GET", path, params=params)
                 if isinstance(data, list): return data
@@ -120,7 +148,7 @@ class FusionPBXClient:
                         if k in data and isinstance(data[k], list): return data[k]
             except FusionPBXError:
                 continue
-        raise FusionPBXError("Nenhum endpoint REST de agents encontrado.")
+        return []  # agents may overlap with extensions, don't fail
 
     async def list_cdr(self, limit: int = 200, start_date: Optional[str] = None,
                        end_date: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -128,16 +156,27 @@ class FusionPBXClient:
         if self.domain_uuid: params["domain_uuid"] = self.domain_uuid
         if start_date: params["start_date"] = start_date
         if end_date: params["end_date"] = end_date
-        for path in ("/api/xml_cdr", "/api/cdr", "/app/xml_cdr/api/cdr.php", "/api/v1/cdr"):
+        paths = []
+        if self.custom_paths.get("cdr"):
+            paths.append(self.custom_paths["cdr"])
+        paths.extend(["/api/xml_cdr", "/api/cdr", "/app/xml_cdr/api/cdr.php",
+                      "/api/v1/cdr", "/app/xml_cdr/xml_cdr.php"])
+        last_err = None
+        for path in paths:
             try:
                 data = await self._request("GET", path, params=params)
                 if isinstance(data, list): return data
                 if isinstance(data, dict):
-                    for k in ("data", "cdr", "items", "rows"):
+                    for k in ("data", "cdr", "items", "rows", "xml_cdr"):
                         if k in data and isinstance(data[k], list): return data[k]
-            except FusionPBXError:
+                    if data: return [data]
+            except FusionPBXError as e:
+                last_err = e
                 continue
-        raise FusionPBXError("Nenhum endpoint REST de CDR encontrado.")
+        raise FusionPBXError(
+            f"Nenhum endpoint REST de CDR encontrado. Configure 'path_cdr'. "
+            f"Último erro: {last_err}"
+        )
 
     async def get_recording_url(self, recording_uuid: str) -> str:
         """Compute URL for a recording. The user can provide a template via base_url + path."""
