@@ -18,6 +18,8 @@ import AuditLogs from "./pages/AuditLogs";
 import Tenants from "./pages/Tenants";
 import Plans from "./pages/Plans";
 import BillingSettings from "./pages/BillingSettings";
+import Charges from "./pages/Charges";
+import FusionPBXSettings from "./pages/FusionPBXSettings";
 
 function App() {
   return (
@@ -38,6 +40,8 @@ function App() {
             <Route path="/tenants" element={<ProtectedRoute><Tenants /></ProtectedRoute>} />
             <Route path="/plans" element={<ProtectedRoute><Plans /></ProtectedRoute>} />
             <Route path="/billing" element={<ProtectedRoute><BillingSettings /></ProtectedRoute>} />
+            <Route path="/charges" element={<ProtectedRoute><Charges /></ProtectedRoute>} />
+            <Route path="/fusionpbx" element={<ProtectedRoute><FusionPBXSettings /></ProtectedRoute>} />
           </Routes>
           <Toaster richColors position="top-right" />
         </BrowserRouter>

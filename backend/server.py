@@ -18,6 +18,13 @@ from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, validator
 
+from integrations.asaas import AsaasClient, AsaasError, map_asaas_status
+from integrations.paypal import PayPalClient, PayPalError, map_paypal_status
+from integrations.fusionpbx import (
+    FusionPBXClient, FusionPBXError,
+    normalize_extension, normalize_queue, normalize_cdr,
+)
+
 EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
 
 def validate_email_str(v: str) -> str:
@@ -1056,6 +1063,503 @@ async def reports_export(type: str, format: str = "xlsx", period: str = "7d",
                                  headers={"Content-Disposition": f'attachment; filename="{filename_base}.pdf"'})
     raise HTTPException(status_code=400, detail="Formato inválido. Use xlsx ou pdf.")
 
+# ---------- Billing: Charges (Asaas + PayPal) ----------
+class ChargeCreate(BaseModel):
+    tenant_id: str
+    gateway: str  # asaas | paypal
+    method: str   # pix | boleto | credit_card | paypal
+    amount: float
+    description: Optional[str] = None
+    customer_name: Optional[str] = None
+    customer_email: Optional[str] = None
+    customer_cpf_cnpj: Optional[str] = None  # required for Asaas
+    customer_phone: Optional[str] = None
+    due_date: Optional[str] = None  # YYYY-MM-DD; defaults to +7d for Asaas
+    currency: str = "BRL"  # PayPal
+
+
+def _serialize_charge(c: dict) -> dict:
+    return {k: c.get(k) for k in [
+        "id", "tenant_id", "gateway", "method", "amount", "currency", "status",
+        "description", "external_id", "invoice_url", "checkout_url",
+        "pix_qrcode", "pix_payload", "boleto_url", "barcode",
+        "customer_name", "customer_email", "due_date", "paid_at",
+        "created_at", "updated_at",
+    ] if c.get(k) is not None}
+
+
+async def _load_billing_settings() -> dict:
+    return await db.billing_settings.find_one({"id": "global"}, {"_id": 0}) or {}
+
+
+async def _get_asaas_client() -> AsaasClient:
+    s = await _load_billing_settings()
+    api_key = s.get("asaas_api_key")
+    if not api_key:
+        raise HTTPException(status_code=400, detail="Asaas não configurado. Vá em Cobrança → Asaas.")
+    env = s.get("asaas_environment", "sandbox")
+    return AsaasClient(api_key=api_key, environment=env)
+
+
+async def _get_paypal_client() -> PayPalClient:
+    s = await _load_billing_settings()
+    cid = s.get("paypal_client_id")
+    secret = s.get("paypal_client_secret")
+    if not cid or not secret:
+        raise HTTPException(status_code=400, detail="PayPal não configurado. Vá em Cobrança → PayPal.")
+    env = s.get("paypal_environment", "sandbox")
+    return PayPalClient(client_id=cid, client_secret=secret, environment=env)
+
+
+@api.post("/billing/charges")
+async def create_charge(body: ChargeCreate, user: dict = Depends(require_super_admin())):
+    tenant = await db.tenants.find_one({"id": body.tenant_id})
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant não encontrado")
+
+    cid = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    base_doc = {
+        "id": cid, "tenant_id": body.tenant_id,
+        "gateway": body.gateway, "method": body.method,
+        "amount": float(body.amount), "currency": body.currency,
+        "description": body.description or f"Mensalidade {tenant.get('name','')}",
+        "customer_name": body.customer_name or tenant.get("name"),
+        "customer_email": body.customer_email,
+        "customer_cpf_cnpj": body.customer_cpf_cnpj,
+        "due_date": body.due_date,
+        "status": "pending",
+        "created_at": now, "updated_at": now,
+    }
+
+    try:
+        if body.gateway == "asaas":
+            method_map = {"pix": "PIX", "boleto": "BOLETO", "credit_card": "CREDIT_CARD"}
+            billing_type = method_map.get(body.method)
+            if not billing_type:
+                raise HTTPException(status_code=400, detail="Método inválido para Asaas. Use pix/boleto/credit_card.")
+            if not body.customer_cpf_cnpj:
+                raise HTTPException(status_code=400, detail="CPF/CNPJ do cliente é obrigatório para Asaas")
+            client = await _get_asaas_client()
+            cpf = "".join(ch for ch in body.customer_cpf_cnpj if ch.isdigit())
+            customer = await client.find_customer_by_cpf(cpf)
+            if not customer:
+                customer = await client.create_customer(
+                    name=base_doc["customer_name"] or "Cliente", cpf_cnpj=cpf,
+                    email=body.customer_email, mobile_phone=body.customer_phone,
+                )
+            due = body.due_date or (datetime.now(timezone.utc) + timedelta(days=7)).strftime("%Y-%m-%d")
+            payment = await client.create_payment(
+                customer_id=customer["id"], billing_type=billing_type,
+                value=float(body.amount), due_date=due,
+                description=base_doc["description"], external_reference=cid,
+            )
+            base_doc["external_id"] = payment.get("id")
+            base_doc["external_customer_id"] = customer["id"]
+            base_doc["invoice_url"] = payment.get("invoiceUrl")
+            base_doc["status"] = map_asaas_status(payment.get("status", "PENDING"))
+            base_doc["due_date"] = due
+            # Get payment-method-specific data
+            if billing_type == "PIX":
+                try:
+                    qr = await client.get_pix_qrcode(payment["id"])
+                    base_doc["pix_qrcode"] = qr.get("encodedImage")  # base64 PNG
+                    base_doc["pix_payload"] = qr.get("payload")
+                except Exception as e:
+                    logger.warning("PIX QR fetch failed: %s", e)
+            elif billing_type == "BOLETO":
+                base_doc["boleto_url"] = payment.get("bankSlipUrl")
+                try:
+                    bd = await client.get_boleto_url(payment["id"])
+                    base_doc["barcode"] = bd.get("identificationField")
+                except Exception: pass
+            base_doc["raw"] = payment
+
+        elif body.gateway == "paypal":
+            client_pp = await _get_paypal_client()
+            order = await client_pp.create_order(
+                amount=float(body.amount), currency=body.currency,
+                reference_id=cid, description=base_doc["description"],
+            )
+            base_doc["external_id"] = order.get("id")
+            base_doc["status"] = map_paypal_status(order.get("status", "CREATED"))
+            for link in order.get("links", []):
+                if link.get("rel") == "approve":
+                    base_doc["checkout_url"] = link.get("href")
+                    break
+            base_doc["raw"] = order
+        else:
+            raise HTTPException(status_code=400, detail="Gateway inválido. Use asaas ou paypal.")
+    except (AsaasError, PayPalError) as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    await db.charges.insert_one(base_doc)
+    await write_audit(user, "create", "charge", cid,
+                      f"{body.gateway}/{body.method} R$ {body.amount:.2f}",
+                      {"tenant_id": body.tenant_id, "gateway": body.gateway})
+    return _serialize_charge(base_doc)
+
+
+@api.get("/billing/charges")
+async def list_charges(
+    user: dict = Depends(require_super_admin()),
+    tenant_id: Optional[str] = None, status: Optional[str] = None,
+    limit: int = Query(100, le=500),
+):
+    q: Dict[str, Any] = {}
+    if tenant_id: q["tenant_id"] = tenant_id
+    if status: q["status"] = status
+    docs = await db.charges.find(q, {"_id": 0, "raw": 0}).sort("created_at", -1).to_list(limit)
+    return {"charges": [_serialize_charge(c) for c in docs]}
+
+
+@api.get("/billing/charges/{cid}")
+async def get_charge(cid: str, user: dict = Depends(require_super_admin())):
+    c = await db.charges.find_one({"id": cid}, {"_id": 0, "raw": 0})
+    if not c: raise HTTPException(status_code=404, detail="Cobrança não encontrada")
+    return _serialize_charge(c)
+
+
+@api.post("/billing/charges/{cid}/sync")
+async def sync_charge(cid: str, user: dict = Depends(require_super_admin())):
+    """Pulls fresh status from gateway."""
+    c = await db.charges.find_one({"id": cid})
+    if not c: raise HTTPException(status_code=404, detail="Cobrança não encontrada")
+    try:
+        if c["gateway"] == "asaas":
+            client = await _get_asaas_client()
+            payment = await client.get_payment(c["external_id"])
+            new_status = map_asaas_status(payment.get("status", "PENDING"))
+        elif c["gateway"] == "paypal":
+            client_pp = await _get_paypal_client()
+            order = await client_pp.get_order(c["external_id"])
+            new_status = map_paypal_status(order.get("status", "CREATED"))
+        else:
+            raise HTTPException(status_code=400, detail="Gateway inválido")
+    except (AsaasError, PayPalError) as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    update = {"status": new_status, "updated_at": datetime.now(timezone.utc).isoformat()}
+    if new_status == "paid" and not c.get("paid_at"):
+        update["paid_at"] = update["updated_at"]
+        # Also mark tenant as paid
+        await db.tenants.update_one({"id": c["tenant_id"]}, {"$set": {"payment_status": "paid"}})
+    await db.charges.update_one({"id": cid}, {"$set": update})
+    fresh = await db.charges.find_one({"id": cid}, {"_id": 0, "raw": 0})
+    return _serialize_charge(fresh)
+
+
+@api.post("/billing/charges/{cid}/capture")
+async def capture_paypal_charge(cid: str, user: dict = Depends(require_super_admin())):
+    """For PayPal orders that have been approved by buyer; capture funds."""
+    c = await db.charges.find_one({"id": cid})
+    if not c: raise HTTPException(status_code=404, detail="Cobrança não encontrada")
+    if c["gateway"] != "paypal":
+        raise HTTPException(status_code=400, detail="Capture é apenas para PayPal")
+    try:
+        client_pp = await _get_paypal_client()
+        result = await client_pp.capture_order(c["external_id"])
+    except PayPalError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    new_status = map_paypal_status(result.get("status", "COMPLETED"))
+    update = {"status": new_status, "updated_at": datetime.now(timezone.utc).isoformat()}
+    if new_status == "paid":
+        update["paid_at"] = update["updated_at"]
+        await db.tenants.update_one({"id": c["tenant_id"]}, {"$set": {"payment_status": "paid"}})
+    await db.charges.update_one({"id": cid}, {"$set": update})
+    return {"ok": True, "status": new_status}
+
+
+# ---------- Webhooks ----------
+@api.post("/webhooks/asaas")
+async def webhook_asaas(request: Request):
+    """Asaas posts JSON. Authenticated via header `asaas-access-token`."""
+    settings = await _load_billing_settings()
+    expected_token = settings.get("asaas_webhook_token")
+    sent_token = request.headers.get("asaas-access-token") or request.headers.get("Asaas-Access-Token")
+    if expected_token and sent_token != expected_token:
+        raise HTTPException(status_code=401, detail="Webhook token inválido")
+    body = await request.json()
+    event = body.get("event", "")
+    payment = body.get("payment", {}) or {}
+    delivery_id = body.get("id") or payment.get("id")
+    if delivery_id and await db.webhook_events.find_one({"delivery_id": delivery_id, "source": "asaas"}):
+        return {"ok": True, "duplicate": True}
+    asaas_pid = payment.get("id")
+    if asaas_pid:
+        c = await db.charges.find_one({"external_id": asaas_pid, "gateway": "asaas"})
+        if c:
+            new_status = map_asaas_status(payment.get("status", "PENDING"))
+            update = {"status": new_status, "updated_at": datetime.now(timezone.utc).isoformat()}
+            if new_status == "paid":
+                update["paid_at"] = update["updated_at"]
+                await db.tenants.update_one({"id": c["tenant_id"]}, {"$set": {"payment_status": "paid"}})
+            await db.charges.update_one({"id": c["id"]}, {"$set": update})
+    await db.webhook_events.insert_one({
+        "id": str(uuid.uuid4()), "source": "asaas", "delivery_id": delivery_id,
+        "event": event, "payload": body,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    return {"ok": True}
+
+
+@api.post("/webhooks/paypal")
+async def webhook_paypal(request: Request):
+    """PayPal sends signed events. We store + try to update charge status."""
+    body = await request.json()
+    event_type = body.get("event_type", "")
+    resource = body.get("resource", {}) or {}
+    delivery_id = body.get("id")
+    if delivery_id and await db.webhook_events.find_one({"delivery_id": delivery_id, "source": "paypal"}):
+        return {"ok": True, "duplicate": True}
+    # Try to extract order ID; events: PAYMENT.CAPTURE.COMPLETED, CHECKOUT.ORDER.APPROVED, etc.
+    order_id = None
+    if "supplementary_data" in resource:
+        rel = resource.get("supplementary_data", {}).get("related_ids", {})
+        order_id = rel.get("order_id")
+    order_id = order_id or resource.get("id")
+    if order_id:
+        c = await db.charges.find_one({"external_id": order_id, "gateway": "paypal"})
+        if c:
+            status_in_event = resource.get("status") or ("COMPLETED" if "CAPTURE.COMPLETED" in event_type else None)
+            new_status = map_paypal_status(status_in_event or "")
+            if new_status:
+                update = {"status": new_status, "updated_at": datetime.now(timezone.utc).isoformat()}
+                if new_status == "paid":
+                    update["paid_at"] = update["updated_at"]
+                    await db.tenants.update_one({"id": c["tenant_id"]}, {"$set": {"payment_status": "paid"}})
+                await db.charges.update_one({"id": c["id"]}, {"$set": update})
+    await db.webhook_events.insert_one({
+        "id": str(uuid.uuid4()), "source": "paypal", "delivery_id": delivery_id,
+        "event": event_type, "payload": body,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    return {"ok": True}
+
+
+# ---------- FusionPBX Integration ----------
+class FusionPBXSettings(BaseModel):
+    enabled: bool = False
+    base_url: str = ""
+    api_key: Optional[str] = None
+    username: Optional[str] = None
+    password: Optional[str] = None
+    domain_uuid: Optional[str] = None
+    domain_name: Optional[str] = None
+    verify_ssl: bool = True
+    sync_interval_minutes: int = 5
+
+
+def _serialize_fusion_settings(s: Optional[dict], mask: bool = True) -> dict:
+    if not s: return {"enabled": False, "configured": False}
+    out = {k: s.get(k) for k in ["enabled", "base_url", "username", "domain_uuid", "domain_name",
+                                  "verify_ssl", "sync_interval_minutes", "last_sync_at", "last_sync_status"]}
+    out["configured"] = bool(s.get("base_url"))
+    out["api_key_set"] = bool(s.get("api_key"))
+    out["password_set"] = bool(s.get("password"))
+    if not mask:
+        out["api_key"] = s.get("api_key")
+        out["password"] = s.get("password")
+    return out
+
+
+async def _resolve_tenant_for_fusion(user: dict, tenant_id: Optional[str]) -> str:
+    if user.get("role") == "super_admin":
+        if not tenant_id:
+            raise HTTPException(status_code=400, detail="tenant_id obrigatório para super-admin")
+        return tenant_id
+    return user["tenant_id"]
+
+
+@api.get("/fusionpbx/settings")
+async def get_fusion_settings(user: dict = Depends(get_current_user), tenant_id: Optional[str] = None):
+    tid = await _resolve_tenant_for_fusion(user, tenant_id)
+    if user.get("role") not in ("super_admin", "admin"):
+        raise HTTPException(status_code=403, detail="Sem permissão")
+    s = await db.fusionpbx_settings.find_one({"tenant_id": tid}, {"_id": 0})
+    return _serialize_fusion_settings(s)
+
+
+@api.put("/fusionpbx/settings")
+async def put_fusion_settings(body: FusionPBXSettings, user: dict = Depends(get_current_user),
+                              tenant_id: Optional[str] = None):
+    tid = await _resolve_tenant_for_fusion(user, tenant_id)
+    if user.get("role") not in ("super_admin", "admin"):
+        raise HTTPException(status_code=403, detail="Sem permissão")
+    payload = body.dict(exclude_unset=True)
+    existing = await db.fusionpbx_settings.find_one({"tenant_id": tid}) or {}
+    # Don't overwrite secrets if a masked/empty value was sent and one already exists
+    for k in ("api_key", "password"):
+        if k in payload and not payload[k]:
+            payload[k] = existing.get(k)
+    payload["tenant_id"] = tid
+    payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+    await db.fusionpbx_settings.update_one({"tenant_id": tid}, {"$set": payload}, upsert=True)
+    await write_audit(user, "update", "fusionpbx_settings", tid, "FusionPBX config",
+                      {"base_url": payload.get("base_url"), "enabled": payload.get("enabled")})
+    s = await db.fusionpbx_settings.find_one({"tenant_id": tid}, {"_id": 0})
+    return _serialize_fusion_settings(s)
+
+
+async def _build_fusion_client(tid: str) -> FusionPBXClient:
+    s = await db.fusionpbx_settings.find_one({"tenant_id": tid})
+    if not s or not s.get("base_url"):
+        raise HTTPException(status_code=400, detail="FusionPBX não configurado para este tenant")
+    if not s.get("enabled", False):
+        raise HTTPException(status_code=400, detail="Integração FusionPBX desativada")
+    return FusionPBXClient(
+        base_url=s["base_url"], api_key=s.get("api_key"),
+        username=s.get("username"), password=s.get("password"),
+        domain_uuid=s.get("domain_uuid"), domain_name=s.get("domain_name"),
+        verify_ssl=bool(s.get("verify_ssl", True)),
+    )
+
+
+@api.post("/fusionpbx/test")
+async def fusion_test(user: dict = Depends(get_current_user), tenant_id: Optional[str] = None):
+    tid = await _resolve_tenant_for_fusion(user, tenant_id)
+    if user.get("role") not in ("super_admin", "admin"):
+        raise HTTPException(status_code=403, detail="Sem permissão")
+    s = await db.fusionpbx_settings.find_one({"tenant_id": tid})
+    if not s or not s.get("base_url"):
+        raise HTTPException(status_code=400, detail="Configure base_url primeiro")
+    client = FusionPBXClient(
+        base_url=s["base_url"], api_key=s.get("api_key"),
+        username=s.get("username"), password=s.get("password"),
+        domain_uuid=s.get("domain_uuid"), domain_name=s.get("domain_name"),
+        verify_ssl=bool(s.get("verify_ssl", True)),
+    )
+    try:
+        result = await client.ping()
+        return {"ok": True, **result}
+    except FusionPBXError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@api.post("/fusionpbx/sync")
+async def fusion_sync(user: dict = Depends(get_current_user), tenant_id: Optional[str] = None,
+                      cdr_limit: int = 200):
+    """Sync extensions, queues, agents and recent CDR from FusionPBX into our DB."""
+    tid = await _resolve_tenant_for_fusion(user, tenant_id)
+    if user.get("role") not in ("super_admin", "admin"):
+        raise HTTPException(status_code=403, detail="Sem permissão")
+    client = await _build_fusion_client(tid)
+    summary = {"agents_synced": 0, "queues_synced": 0, "calls_synced": 0,
+               "errors": [], "started_at": datetime.now(timezone.utc).isoformat()}
+    # Extensions -> agents (only if not already mapped)
+    try:
+        exts = await client.list_extensions()
+        for raw in exts:
+            ext = normalize_extension(raw)
+            if not ext["external_id"]: continue
+            existing = await db.agents.find_one({"tenant_id": tid, "external_id": ext["external_id"]})
+            doc = {
+                "tenant_id": tid, "external_id": ext["external_id"],
+                "name": ext["name"], "username": ext["username"],
+                "extension": ext["extension"], "email": ext["email"],
+                "avatar": existing.get("avatar") if existing else AGENT_AVATARS[summary["agents_synced"] % len(AGENT_AVATARS)],
+                "status": existing.get("status") if existing else "offline",
+                "queues": existing.get("queues", []) if existing else [],
+                "calls_handled": existing.get("calls_handled", 0) if existing else 0,
+                "avg_handle_sec": existing.get("avg_handle_sec", 0) if existing else 0,
+                "csat": existing.get("csat", 0) if existing else 0,
+                "adherence_pct": existing.get("adherence_pct", 0) if existing else 0,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            if existing:
+                await db.agents.update_one({"id": existing["id"]}, {"$set": doc})
+            else:
+                doc["id"] = str(uuid.uuid4())
+                doc["created_at"] = doc["updated_at"]
+                await db.agents.insert_one(doc)
+            summary["agents_synced"] += 1
+    except FusionPBXError as e:
+        summary["errors"].append(f"extensions: {e}")
+    # Queues
+    try:
+        queues = await client.list_call_center_queues()
+        for raw in queues:
+            q = normalize_queue(raw)
+            if not q["external_id"]: continue
+            existing = await db.queues.find_one({"tenant_id": tid, "external_id": q["external_id"]})
+            doc = {
+                "tenant_id": tid, "external_id": q["external_id"],
+                "name": q["name"], "extension": q["extension"],
+                "strategy": q["strategy"], "max_wait": q["max_wait"],
+                "waiting": existing.get("waiting", 0) if existing else 0,
+                "answered_today": existing.get("answered_today", 0) if existing else 0,
+                "missed_today": existing.get("missed_today", 0) if existing else 0,
+                "avg_wait_sec": existing.get("avg_wait_sec", 0) if existing else 0,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            if existing:
+                await db.queues.update_one({"id": existing["id"]}, {"$set": doc})
+            else:
+                doc["id"] = str(uuid.uuid4())
+                doc["created_at"] = doc["updated_at"]
+                await db.queues.insert_one(doc)
+            summary["queues_synced"] += 1
+    except FusionPBXError as e:
+        summary["errors"].append(f"queues: {e}")
+    # CDR
+    try:
+        cdrs = await client.list_cdr(limit=cdr_limit)
+        agent_map = {a["external_id"]: a for a in await db.agents.find(
+            {"tenant_id": tid, "external_id": {"$ne": None}}, {"_id": 0}).to_list(2000)}
+        queue_map = {q["external_id"]: q for q in await db.queues.find(
+            {"tenant_id": tid, "external_id": {"$ne": None}}, {"_id": 0}).to_list(2000)}
+        for raw in cdrs:
+            n = normalize_cdr(raw)
+            if not n["external_id"]: continue
+            existing = await db.calls.find_one({"tenant_id": tid, "external_id": n["external_id"]})
+            agent = agent_map.get(n["agent_external_id"]) if n["agent_external_id"] else None
+            queue = queue_map.get(n["queue_external_id"]) if n["queue_external_id"] else None
+            doc = {
+                "tenant_id": tid, "external_id": n["external_id"],
+                "agent_id": agent["id"] if agent else None,
+                "agent_name": agent["name"] if agent else "—",
+                "queue_id": queue["id"] if queue else None,
+                "queue_name": queue["name"] if queue else (n["queue_name"] or "—"),
+                "direction": n["direction"],
+                "caller_number": n["caller_number"], "callee_number": n["callee_number"],
+                "disposition": n["disposition"], "abandonment_type": n["abandonment_type"],
+                "wait_sec": n["wait_sec"], "duration_sec": n["duration_sec"],
+                "started_at": n["started_at"], "ended_at": n["ended_at"],
+                "recording_uuid": n.get("recording_uuid"),
+            }
+            if existing:
+                await db.calls.update_one({"id": existing["id"]}, {"$set": doc})
+            else:
+                doc["id"] = str(uuid.uuid4())
+                await db.calls.insert_one(doc)
+                # Build a recording entry if there's a recording_uuid and disposition was answered
+                if n.get("recording_uuid") and n["disposition"] == "answered":
+                    rec_url = await client.get_recording_url(n["recording_uuid"])
+                    await db.recordings.insert_one({
+                        "id": str(uuid.uuid4()), "tenant_id": tid,
+                        "external_id": n["recording_uuid"], "call_id": doc["id"],
+                        "agent_id": doc["agent_id"], "agent_name": doc["agent_name"],
+                        "queue_id": doc["queue_id"], "queue_name": doc["queue_name"],
+                        "caller_number": n["caller_number"],
+                        "duration_sec": n["duration_sec"],
+                        "audio_url": rec_url, "size_mb": round(n["duration_sec"] * 0.012, 2),
+                        "started_at": n["started_at"], "notes": "",
+                    })
+            summary["calls_synced"] += 1
+    except FusionPBXError as e:
+        summary["errors"].append(f"cdr: {e}")
+    summary["finished_at"] = datetime.now(timezone.utc).isoformat()
+    summary["status"] = "error" if summary["errors"] and summary["agents_synced"] == 0 else "ok"
+    await db.fusionpbx_settings.update_one(
+        {"tenant_id": tid},
+        {"$set": {"last_sync_at": summary["finished_at"], "last_sync_status": summary["status"],
+                  "last_sync_summary": summary}},
+    )
+    await write_audit(user, "sync", "fusionpbx", tid, "Sync FusionPBX",
+                      {"agents": summary["agents_synced"], "queues": summary["queues_synced"], "calls": summary["calls_synced"]})
+    return summary
+
+
 # ---------- Seeding ----------
 DEMO_AGENTS_A = [("Ana Silva", "ana.silva"), ("Bruno Lima", "bruno.lima"),
                  ("Carla Santos", "carla.santos"), ("Diego Costa", "diego.costa")]
@@ -1212,6 +1716,10 @@ async def on_startup():
     await db.calls.create_index([("tenant_id", 1), ("started_at", -1)])
     await db.recordings.create_index([("tenant_id", 1), ("started_at", -1)])
     await db.audit_logs.create_index([("tenant_id", 1), ("created_at", -1)])
+    await db.charges.create_index([("tenant_id", 1), ("created_at", -1)])
+    await db.charges.create_index("external_id")
+    await db.fusionpbx_settings.create_index("tenant_id", unique=True)
+    await db.webhook_events.create_index([("source", 1), ("delivery_id", 1)])
     await seed_data()
 
 @app.on_event("shutdown")

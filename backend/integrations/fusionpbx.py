@@ -1,0 +1,211 @@
+"""FusionPBX REST API connector.
+
+Since FusionPBX has limited official REST endpoints in the open-source version,
+this connector supports two approaches:
+  1) Generic REST endpoints (configurable paths) - works with `fusionapi` or custom PHP scripts.
+  2) Direct PHP endpoints under /app/* (e.g., /app/registrations/check_registration.php).
+
+Each tenant configures: base_url, api_key (Authorization Bearer) OR username/password,
+domain_uuid, recordings_url_template.
+"""
+from __future__ import annotations
+import logging
+from typing import Optional, Dict, Any, List
+import httpx
+
+logger = logging.getLogger(__name__)
+
+
+class FusionPBXError(Exception):
+    pass
+
+
+class FusionPBXClient:
+    """REST client for FusionPBX. Tries Authorization: Bearer <api_key> first, then Basic auth."""
+
+    def __init__(self, base_url: str, api_key: Optional[str] = None,
+                 username: Optional[str] = None, password: Optional[str] = None,
+                 domain_uuid: Optional[str] = None, domain_name: Optional[str] = None,
+                 verify_ssl: bool = True):
+        if not base_url:
+            raise FusionPBXError("base_url do FusionPBX não configurado")
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.username = username
+        self.password = password
+        self.domain_uuid = domain_uuid
+        self.domain_name = domain_name
+        self.verify_ssl = verify_ssl
+        self.timeout = httpx.Timeout(30.0)
+
+    def _auth(self):
+        if self.username and self.password:
+            return httpx.BasicAuth(self.username, self.password)
+        return None
+
+    def _headers(self) -> Dict[str, str]:
+        h = {"Accept": "application/json"}
+        if self.api_key:
+            h["Authorization"] = f"Bearer {self.api_key}"
+        return h
+
+    async def _request(self, method: str, path: str, **kwargs) -> Any:
+        url = f"{self.base_url}{path}" if path.startswith("/") else f"{self.base_url}/{path}"
+        async with httpx.AsyncClient(timeout=self.timeout, verify=self.verify_ssl, follow_redirects=True) as client:
+            try:
+                r = await client.request(method, url, headers=self._headers(), auth=self._auth(), **kwargs)
+            except httpx.HTTPError as e:
+                raise FusionPBXError(f"Falha de conexão FusionPBX: {e}") from e
+            if r.status_code >= 400:
+                raise FusionPBXError(f"FusionPBX {r.status_code} em {path}: {r.text[:300]}")
+            ct = r.headers.get("content-type", "")
+            if "application/json" in ct:
+                try:
+                    return r.json()
+                except Exception:
+                    return {"raw": r.text}
+            return {"raw": r.text}
+
+    async def ping(self) -> Dict[str, Any]:
+        """Simple health check. Tries /api/status, fallback to /."""
+        try:
+            return {"ok": True, "data": await self._request("GET", "/api/status")}
+        except FusionPBXError:
+            try:
+                async with httpx.AsyncClient(timeout=self.timeout, verify=self.verify_ssl) as client:
+                    r = await client.get(self.base_url, headers=self._headers(), auth=self._auth())
+                    return {"ok": r.status_code < 500, "status_code": r.status_code}
+            except Exception as e:
+                raise FusionPBXError(f"Servidor inacessível: {e}") from e
+
+    async def list_extensions(self) -> List[Dict[str, Any]]:
+        """Try common endpoints used by community fusionapi scripts."""
+        params = {}
+        if self.domain_uuid: params["domain_uuid"] = self.domain_uuid
+        for path in ("/api/extensions", "/app/extensions/api/extensions.php", "/api/v1/extensions"):
+            try:
+                data = await self._request("GET", path, params=params)
+                if isinstance(data, list): return data
+                if isinstance(data, dict):
+                    for k in ("data", "extensions", "items", "rows"):
+                        if k in data and isinstance(data[k], list): return data[k]
+                    return [data] if data else []
+            except FusionPBXError:
+                continue
+        raise FusionPBXError("Nenhum endpoint REST de extensions encontrado. Configure um endpoint custom.")
+
+    async def list_call_center_queues(self) -> List[Dict[str, Any]]:
+        params = {}
+        if self.domain_uuid: params["domain_uuid"] = self.domain_uuid
+        for path in ("/api/call_center_queues", "/app/call_center/api/queues.php", "/api/v1/call_center/queues"):
+            try:
+                data = await self._request("GET", path, params=params)
+                if isinstance(data, list): return data
+                if isinstance(data, dict):
+                    for k in ("data", "queues", "items", "rows"):
+                        if k in data and isinstance(data[k], list): return data[k]
+            except FusionPBXError:
+                continue
+        raise FusionPBXError("Nenhum endpoint REST de queues encontrado.")
+
+    async def list_call_center_agents(self) -> List[Dict[str, Any]]:
+        params = {}
+        if self.domain_uuid: params["domain_uuid"] = self.domain_uuid
+        for path in ("/api/call_center_agents", "/app/call_center/api/agents.php", "/api/v1/call_center/agents"):
+            try:
+                data = await self._request("GET", path, params=params)
+                if isinstance(data, list): return data
+                if isinstance(data, dict):
+                    for k in ("data", "agents", "items", "rows"):
+                        if k in data and isinstance(data[k], list): return data[k]
+            except FusionPBXError:
+                continue
+        raise FusionPBXError("Nenhum endpoint REST de agents encontrado.")
+
+    async def list_cdr(self, limit: int = 200, start_date: Optional[str] = None,
+                       end_date: Optional[str] = None) -> List[Dict[str, Any]]:
+        params: Dict[str, Any] = {"limit": limit}
+        if self.domain_uuid: params["domain_uuid"] = self.domain_uuid
+        if start_date: params["start_date"] = start_date
+        if end_date: params["end_date"] = end_date
+        for path in ("/api/xml_cdr", "/api/cdr", "/app/xml_cdr/api/cdr.php", "/api/v1/cdr"):
+            try:
+                data = await self._request("GET", path, params=params)
+                if isinstance(data, list): return data
+                if isinstance(data, dict):
+                    for k in ("data", "cdr", "items", "rows"):
+                        if k in data and isinstance(data[k], list): return data[k]
+            except FusionPBXError:
+                continue
+        raise FusionPBXError("Nenhum endpoint REST de CDR encontrado.")
+
+    async def get_recording_url(self, recording_uuid: str) -> str:
+        """Compute URL for a recording. The user can provide a template via base_url + path."""
+        return f"{self.base_url}/app/recordings/recording.php?id={recording_uuid}"
+
+    async def list_active_calls(self) -> List[Dict[str, Any]]:
+        """Channels currently active in FreeSWITCH (mod_event_socket usually, but FusionPBX may expose REST)."""
+        params = {}
+        if self.domain_uuid: params["domain_uuid"] = self.domain_uuid
+        for path in ("/api/active_calls", "/app/active_calls/api/calls.php", "/api/v1/active_calls"):
+            try:
+                data = await self._request("GET", path, params=params)
+                if isinstance(data, list): return data
+                if isinstance(data, dict):
+                    for k in ("data", "calls", "items", "rows"):
+                        if k in data and isinstance(data[k], list): return data[k]
+            except FusionPBXError:
+                continue
+        return []  # active calls is non-critical, return empty if unsupported
+
+
+def normalize_extension(ext: Dict[str, Any]) -> Dict[str, Any]:
+    """Map FusionPBX extension fields to our internal agent shape."""
+    return {
+        "external_id": ext.get("extension_uuid") or ext.get("uuid") or ext.get("id"),
+        "extension": str(ext.get("extension") or ext.get("number") or ""),
+        "name": ext.get("effective_caller_id_name") or ext.get("description") or ext.get("name") or f"Ramal {ext.get('extension', '?')}",
+        "username": ext.get("user") or ext.get("username") or str(ext.get("extension", "")),
+        "email": ext.get("mwi_account") or ext.get("email") or "",
+    }
+
+
+def normalize_queue(q: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "external_id": q.get("call_center_queue_uuid") or q.get("uuid") or q.get("id"),
+        "name": q.get("queue_name") or q.get("name") or "Fila",
+        "extension": str(q.get("queue_extension") or q.get("extension") or ""),
+        "strategy": q.get("queue_strategy") or q.get("strategy") or "ring-all",
+        "max_wait": int(q.get("queue_max_wait_time") or q.get("max_wait", 120) or 120),
+    }
+
+
+def normalize_cdr(c: Dict[str, Any]) -> Dict[str, Any]:
+    """Map FusionPBX xml_cdr row to our `calls` schema. Best-effort across variants."""
+    direction = c.get("direction") or "inbound"
+    disposition_raw = (c.get("hangup_cause") or c.get("disposition") or "").upper()
+    if disposition_raw in ("NORMAL_CLEARING", "ANSWERED"):
+        disposition = "answered"
+    elif disposition_raw in ("ORIGINATOR_CANCEL", "NO_ANSWER", "NO_USER_RESPONSE"):
+        disposition = "missed"
+    elif disposition_raw in ("NORMAL_TEMPORARY_FAILURE", "USER_BUSY", "CALL_REJECTED"):
+        disposition = "abandoned"
+    else:
+        disposition = "missed"
+    duration = int(c.get("duration") or c.get("billsec") or 0)
+    return {
+        "external_id": c.get("xml_cdr_uuid") or c.get("uuid") or c.get("call_uuid"),
+        "direction": direction if direction in ("inbound", "outbound") else "inbound",
+        "caller_number": c.get("caller_id_number") or "",
+        "callee_number": c.get("destination_number") or "",
+        "queue_external_id": c.get("call_center_queue_uuid"),
+        "queue_name": c.get("queue_name") or "",
+        "agent_external_id": c.get("cc_agent") or c.get("agent_uuid"),
+        "duration_sec": duration,
+        "wait_sec": int(c.get("waitsec") or 0),
+        "disposition": disposition,
+        "abandonment_type": "agent_loss" if disposition == "missed" else ("queue_abandon" if disposition == "abandoned" else None),
+        "started_at": c.get("start_stamp") or c.get("start_date") or "",
+        "ended_at": c.get("end_stamp") or c.get("end_date") or "",
+        "recording_uuid": c.get("record_name") or c.get("recording_uuid"),
+    }

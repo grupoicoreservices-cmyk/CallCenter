@@ -1,7 +1,7 @@
 import { NavLink, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard, PhoneCall, Disc3, BarChart3, Users, UserCog, LogOut, Headphones,
-  Tv2, ShieldCheck, History, Building2, X, Sparkles, CreditCard,
+  Tv2, ShieldCheck, History, Building2, X, Sparkles, CreditCard, Receipt, Server,
 } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
 
@@ -77,8 +77,19 @@ export default function Sidebar() {
               className={({ isActive }) => `sidebar-item flex items-center gap-3 px-3 py-2 text-sm text-zinc-300 border-l-2 border-transparent rounded-r-sm ${isActive ? "active" : ""}`}>
               <CreditCard size={16} strokeWidth={1.8} /><span>Cobrança</span>
             </NavLink>
+            <NavLink to="/charges" end data-testid="nav-charges"
+              className={({ isActive }) => `sidebar-item flex items-center gap-3 px-3 py-2 text-sm text-zinc-300 border-l-2 border-transparent rounded-r-sm ${isActive ? "active" : ""}`}>
+              <Receipt size={16} strokeWidth={1.8} /><span>Faturas</span>
+            </NavLink>
           </>
         )}
+        {/* FusionPBX integration: super admin (when in tenant context) and admins */}
+        {(isSuper && tenantContext) || user?.role === "admin" ? (
+          <NavLink to="/fusionpbx" end data-testid="nav-fusionpbx"
+            className={({ isActive }) => `sidebar-item flex items-center gap-3 px-3 py-2 text-sm text-zinc-300 border-l-2 border-transparent rounded-r-sm ${isActive ? "active" : ""}`}>
+            <Server size={16} strokeWidth={1.8} /><span>FusionPBX</span>
+          </NavLink>
+        ) : null}
         {/* Regular nav (only when in tenant context or for tenant users) */}
         {(tenantContext || !isSuper) && visibleItems.map((it) => (
           <NavLink key={it.to} to={it.to} end={it.to === "/"} data-testid={it.testid}

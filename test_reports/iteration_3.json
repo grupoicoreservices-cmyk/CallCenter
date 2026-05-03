@@ -1,0 +1,61 @@
+{
+  "summary": "Iter-3 backend regression + new endpoints (Asaas/PayPal Charges, public webhooks, FusionPBX per-tenant settings/test/sync). 32 of 33 pytest tests pass. All review-request error paths verified (400/401/403/404/502). One minor: /api/webhooks/asaas returns 500 (instead of 4xx) when posted a non-JSON body.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "/api/webhooks/asaas (and likely /api/webhooks/paypal)",
+        "issue": "Returns 500 Internal Server Error when body is not valid JSON. `await request.json()` is unguarded — should be wrapped in try/except and return 400 'Invalid JSON' so a misbehaving sender does not generate noisy 5xx alerts."
+      }
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_billing_fusionpbx.py",
+    "/app/test_reports/pytest/iter3_results.xml"
+  ],
+  "action_items": [
+    "(Low) Wrap `await request.json()` in /api/webhooks/asaas and /api/webhooks/paypal with try/except json.JSONDecodeError -> raise HTTPException(400). Same applies to any place that parses raw request bodies.",
+    "(Optional) Old test file /app/backend/tests/test_callcenter_api.py still uses pre-multitenancy creds (admin@callcenter.com). Either delete it or update to use root@voxyra.io / domain-based auth so the regression suite stays runnable.",
+    "(Optional) /api/billing/charges create response includes a `raw` field (full upstream payload) on success. Consider stripping it from the response (already excluded from list/get via projection) to keep response payloads small."
+  ],
+  "critical_code_review_comments": [
+    "server.py is now ~1737 lines mixing auth, dashboard, reports, billing/charges, webhooks, FusionPBX. Strongly recommend splitting into routers (routers/auth.py, routers/billing.py, routers/fusionpbx.py, routers/webhooks.py) per the >700-line guideline.",
+    "Public webhooks /api/webhooks/asaas and /api/webhooks/paypal use `await request.json()` without try/except; malformed body → 500. Should return 400 'Invalid JSON'. Same JSON-parse hardening should be applied if PayPal sends signature headers but we don't yet verify them.",
+    "PayPal webhook does not appear to verify the PAYPAL-TRANSMISSION-SIG signature against `paypal_webhook_id`. For production, integrate PayPal's webhook signature verification endpoint or library — without it any caller can mark an order paid by guessing/scraping order ids.",
+    "Asaas webhook checks `asaas-access-token` only when `expected_token` is set. If the operator forgets to configure asaas_webhook_token in /api/billing/settings, the endpoint becomes fully open. Either require the token (fail-closed) or log a startup warning when unset.",
+    "FusionPBX `password` and `api_key` are stored in plaintext in db.fusionpbx_settings and the GET /settings endpoint returns them. The PUT path keeps existing values when a falsy value is sent, which is good, but on GET the secrets are not masked the way /api/billing/settings masks Asaas/PayPal secrets. Recommend masking on read.",
+    "/api/billing/charges insert includes the entire `raw` upstream payment object — fine for debugging but it grows the document, may include PII (customer data from Asaas), and makes audits noisier. Consider storing it in a separate `charge_raw` collection or trimming sensitive fields."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_billing_fusionpbx.py (new)",
+    "/app/test_reports/iteration_3.json (new)",
+    "/app/test_reports/pytest/iter3_results.xml (new)"
+  ],
+  "success_rate": {"backend": "97% (32/33)", "frontend": "not tested (per request)"},
+  "test_credentials": "Used /app/memory/test_credentials.md verbatim: super root@voxyra.io/root123, tenant admin admin@empresa-a.local/admin123 (domain empresa-a.local), tenant agent agent@empresa-a.local/agent123.",
+  "seed_data_creation": "None — only wrote a fake Asaas API key into billing_settings and a placeholder FusionPBX config (https://pbx.invalid.local:8443) on tenant empresa-a.local to drive 502/disabled-400 paths. Both are harmless test data and use prefix TEST_ where applicable.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Run: pytest /app/backend/tests/test_billing_fusionpbx.py -v. The suite covers (a) regression: auth/me, login invalid 401, tenants list, plans list, features-catalog (asserts 28 features), billing/settings masking + roundtrip, dashboard/stats + realtime/calls + recordings under super-admin X-Tenant-Context header, /users for tenant admin; (b) charges: list (super), list filtered by tenant_id+status, GET 404 invalid id, POST sync 404 invalid id, POST create with unknown tenant 404, asaas pix without config 400 OR 502 (depends on whether earlier masking test left fake key), asaas with method=paypal 400, asaas missing CPF 400, paypal not configured 400 (test clears creds first), unknown gateway 400; (c) webhooks: /api/webhooks/asaas and /api/webhooks/paypal accept JSON anonymously and return 200 — KNOWN BUG: malformed body returns 500 instead of 400; (d) fusionpbx: super admin without tenant_id 400, super admin with tenant_id 200, tenant admin (no tenant_id) uses own tenant 200, tenant agent 403, PUT then GET roundtrips base_url, /test with no base_url 400, /test with invalid host returns 502 (FusionPBXError), /sync with enabled=false 400, /sync as agent 403, /sync as super w/o tenant 400. Note: the older /app/backend/tests/test_callcenter_api.py uses obsolete creds (admin@callcenter.com) and will fail on auth — main agent should remove or update.",
+  "verified_endpoints": [
+    "POST /api/auth/login (super + tenant admin + tenant agent)",
+    "GET /api/auth/me",
+    "GET /api/tenants, /api/plans, /api/plans/features-catalog (28 items)",
+    "GET/PUT /api/billing/settings (masking + secret preserve)",
+    "GET /api/dashboard/stats, /api/realtime/calls, /api/recordings (with X-Tenant-Context)",
+    "GET /api/users (tenant admin scope)",
+    "POST /api/billing/charges (404 unknown tenant; 400 invalid method/missing CPF/unknown gateway/PayPal not configured; 400 or 502 Asaas with stub creds)",
+    "GET /api/billing/charges (list, with tenant_id+status filters)",
+    "GET /api/billing/charges/{id} (404)",
+    "POST /api/billing/charges/{id}/sync (404)",
+    "POST /api/webhooks/asaas (200 public)",
+    "POST /api/webhooks/paypal (200 public)",
+    "GET /api/fusionpbx/settings (super 400 w/o tenant; super 200 w/ tenant; admin 200 self; agent 403)",
+    "PUT /api/fusionpbx/settings (super w/ tenant_id; persists base_url+enabled)",
+    "POST /api/fusionpbx/test (400 no base_url; 502 invalid host)",
+    "POST /api/fusionpbx/sync (400 disabled; 403 agent; 400 super w/o tenant)"
+  ],
+  "rca of the issue": "Webhook 500 on bad JSON: /api/webhooks/asaas line ~1282 calls `await request.json()` without exception handling. FastAPI's Request.json() raises json.JSONDecodeError on malformed body, propagated as 500. Reproduction: `curl -X POST $URL/api/webhooks/asaas -H 'Content-Type: application/json' -d 'not json'`. Mitigation: wrap in try/except json.JSONDecodeError → raise HTTPException(status_code=400, detail='Invalid JSON'). Same fix for /api/webhooks/paypal."
+}

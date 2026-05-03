@@ -16,7 +16,7 @@ import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from "../components/ui/alert-dialog";
-import { Plus, Pencil, Trash2, LogIn, Shield, Search, Building2 } from "lucide-react";
+import { Plus, Pencil, Trash2, LogIn, Shield, Search, Building2, Receipt } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "../contexts/AuthContext";
 
@@ -133,6 +133,9 @@ export default function Tenants() {
             <div className="flex items-center gap-1 mt-4 pt-4 border-t border-border">
               <Button size="sm" variant="default" onClick={() => impersonate(t)} disabled={!t.active} data-testid={`tenant-enter-${t.id}`}>
                 <LogIn size={12} className="mr-1.5" /> Acessar
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => navigate(`/charges?tenant=${t.id}`)} data-testid={`tenant-charge-${t.id}`} title="Cobrar este tenant">
+                <Receipt size={12} />
               </Button>
               <Button size="sm" variant="outline" onClick={() => setEditing(t)} data-testid={`tenant-edit-${t.id}`}>
                 <Pencil size={12} />
