@@ -1,7 +1,7 @@
 import { NavLink, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard, PhoneCall, Disc3, BarChart3, Users, UserCog, LogOut, Headphones,
-  Tv2, ShieldCheck, History, Building2, X,
+  Tv2, ShieldCheck, History, Building2, X, Sparkles, CreditCard,
 } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
 
@@ -64,12 +64,20 @@ export default function Sidebar() {
       <nav className="flex-1 px-2 py-4 space-y-0.5">
         {/* Super admin: Tenants nav */}
         {isSuper && (
-          <NavLink to="/tenants" end data-testid="nav-tenants"
-            className={({ isActive }) =>
-              `sidebar-item flex items-center gap-3 px-3 py-2 text-sm text-zinc-300 border-l-2 border-transparent rounded-r-sm ${isActive ? "active" : ""}`}>
-            <Building2 size={16} strokeWidth={1.8} />
-            <span>Tenants</span>
-          </NavLink>
+          <>
+            <NavLink to="/tenants" end data-testid="nav-tenants"
+              className={({ isActive }) => `sidebar-item flex items-center gap-3 px-3 py-2 text-sm text-zinc-300 border-l-2 border-transparent rounded-r-sm ${isActive ? "active" : ""}`}>
+              <Building2 size={16} strokeWidth={1.8} /><span>Tenants</span>
+            </NavLink>
+            <NavLink to="/plans" end data-testid="nav-plans"
+              className={({ isActive }) => `sidebar-item flex items-center gap-3 px-3 py-2 text-sm text-zinc-300 border-l-2 border-transparent rounded-r-sm ${isActive ? "active" : ""}`}>
+              <Sparkles size={16} strokeWidth={1.8} /><span>Planos</span>
+            </NavLink>
+            <NavLink to="/billing" end data-testid="nav-billing"
+              className={({ isActive }) => `sidebar-item flex items-center gap-3 px-3 py-2 text-sm text-zinc-300 border-l-2 border-transparent rounded-r-sm ${isActive ? "active" : ""}`}>
+              <CreditCard size={16} strokeWidth={1.8} /><span>Cobrança</span>
+            </NavLink>
+          </>
         )}
         {/* Regular nav (only when in tenant context or for tenant users) */}
         {(tenantContext || !isSuper) && visibleItems.map((it) => (

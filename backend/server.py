@@ -166,6 +166,11 @@ class TenantCreate(BaseModel):
     max_users: int = 50
     max_agents: int = 50
     active: bool = True
+    plan_id: Optional[str] = None
+    contract_value: Optional[float] = None
+    contract_start: Optional[str] = None
+    contract_end: Optional[str] = None
+    payment_status: str = "pending"  # paid | pending | overdue | trial
 
 class TenantUpdate(BaseModel):
     name: Optional[str] = None
@@ -175,12 +180,40 @@ class TenantUpdate(BaseModel):
     max_users: Optional[int] = None
     max_agents: Optional[int] = None
     active: Optional[bool] = None
+    plan_id: Optional[str] = None
+    contract_value: Optional[float] = None
+    contract_start: Optional[str] = None
+    contract_end: Optional[str] = None
+    payment_status: Optional[str] = None
+
+class PlanCreate(BaseModel):
+    name: str
+    description: Optional[str] = ""
+    monthly_price: float
+    max_users: int = 10
+    max_agents: int = 10
+    features: List[str] = []
+    active: bool = True
+
+class PlanUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    monthly_price: Optional[float] = None
+    max_users: Optional[int] = None
+    max_agents: Optional[int] = None
+    features: Optional[List[str]] = None
+    active: Optional[bool] = None
 
 def _serialize_tenant(t: dict) -> dict:
     return {k: t.get(k) for k in [
         "id", "domain", "name", "accent_color", "logo_url",
         "timezone", "max_users", "max_agents", "active", "created_at",
+        "plan_id", "contract_value", "contract_start", "contract_end", "payment_status",
     ]}
+
+def _serialize_plan(p: dict) -> dict:
+    return {k: p.get(k) for k in ["id", "name", "description", "monthly_price",
+                                   "max_users", "max_agents", "features", "active", "created_at"]}
 
 # ---------- Auth Endpoints ----------
 def _set_auth_cookie(response: Response, token: str):
@@ -326,6 +359,134 @@ async def impersonate_tenant(tid: str, user: dict = Depends(require_super_admin(
     t = await db.tenants.find_one({"id": tid})
     if not t: raise HTTPException(status_code=404, detail="Tenant não encontrado")
     return {"tenant": _serialize_tenant(t)}
+
+@api.get("/tenants/{tid}/stats")
+async def tenant_stats(tid: str, user: dict = Depends(require_super_admin())):
+    """Usage statistics for a single tenant - super admin view."""
+    t = await db.tenants.find_one({"id": tid})
+    if not t: raise HTTPException(status_code=404, detail="Tenant não encontrado")
+    f = {"tenant_id": tid}
+    cutoff_30d = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    users_count = await db.users.count_documents(f)
+    agents_count = await db.agents.count_documents(f)
+    queues_count = await db.queues.count_documents(f)
+    calls_30d = await db.calls.count_documents({**f, "started_at": {"$gte": cutoff_30d}})
+    answered_30d = await db.calls.count_documents({**f, "started_at": {"$gte": cutoff_30d}, "disposition": "answered"})
+    recordings = await db.recordings.find({**f, "started_at": {"$gte": cutoff_30d}}, {"_id": 0, "duration_sec": 1, "size_mb": 1}).to_list(5000)
+    total_minutes = sum(r.get("duration_sec", 0) for r in recordings) / 60
+    total_storage_mb = sum(r.get("size_mb", 0) for r in recordings)
+    # Plan info
+    plan = None
+    if t.get("plan_id"):
+        plan = await db.plans.find_one({"id": t["plan_id"]}, {"_id": 0})
+    return {
+        "tenant": _serialize_tenant(t),
+        "plan": _serialize_plan(plan) if plan else None,
+        "usage": {
+            "users": users_count, "users_limit": t.get("max_users", 0),
+            "agents": agents_count, "agents_limit": t.get("max_agents", 0),
+            "queues": queues_count,
+            "calls_30d": calls_30d,
+            "answered_30d": answered_30d,
+            "recording_minutes_30d": round(total_minutes, 1),
+            "recording_storage_mb": round(total_storage_mb, 1),
+            "recordings_count_30d": len(recordings),
+        },
+    }
+
+# ---------- Plans (super admin) ----------
+@api.get("/plans")
+async def list_plans(user: dict = Depends(get_current_user)):
+    """Public to authenticated users so tenants can see their plan info."""
+    docs = await db.plans.find({}, {"_id": 0}).sort("monthly_price", 1).to_list(100)
+    return {"plans": [_serialize_plan(p) for p in docs]}
+
+@api.post("/plans")
+async def create_plan(body: PlanCreate, user: dict = Depends(require_super_admin())):
+    pid = str(uuid.uuid4())
+    doc = {"id": pid, **body.dict(), "created_at": datetime.now(timezone.utc).isoformat()}
+    await db.plans.insert_one(doc)
+    await write_audit(user, "create", "plan", pid, body.name, {"price": body.monthly_price})
+    return _serialize_plan(doc)
+
+@api.patch("/plans/{pid}")
+async def update_plan(pid: str, body: PlanUpdate, user: dict = Depends(require_super_admin())):
+    target = await db.plans.find_one({"id": pid})
+    if not target: raise HTTPException(status_code=404, detail="Plano não encontrado")
+    update = {k: v for k, v in body.dict(exclude_unset=True).items() if v is not None}
+    if update:
+        await db.plans.update_one({"id": pid}, {"$set": update})
+        await write_audit(user, "update", "plan", pid, target.get("name", ""), update)
+    fresh = await db.plans.find_one({"id": pid}, {"_id": 0})
+    return _serialize_plan(fresh)
+
+@api.delete("/plans/{pid}")
+async def delete_plan(pid: str, user: dict = Depends(require_super_admin())):
+    target = await db.plans.find_one({"id": pid})
+    if not target: raise HTTPException(status_code=404, detail="Plano não encontrado")
+    in_use = await db.tenants.count_documents({"plan_id": pid})
+    if in_use:
+        raise HTTPException(status_code=400, detail=f"Plano em uso por {in_use} tenant(s). Mova-os antes de excluir.")
+    await db.plans.delete_one({"id": pid})
+    await write_audit(user, "delete", "plan", pid, target.get("name", ""), {})
+    return {"ok": True}
+
+# ---------- Logo upload (local FS) ----------
+import shutil
+from fastapi import UploadFile, File
+from fastapi.staticfiles import StaticFiles
+
+UPLOAD_DIR = ROOT_DIR / "uploads"
+UPLOAD_DIR.mkdir(exist_ok=True)
+
+@api.post("/uploads/logo")
+async def upload_logo(file: UploadFile = File(...), user: dict = Depends(require_super_admin())):
+    ext = (file.filename or "").rsplit(".", 1)[-1].lower()
+    if ext not in {"png", "jpg", "jpeg", "webp", "svg", "gif"}:
+        raise HTTPException(status_code=400, detail="Formato inválido (use png/jpg/webp/svg)")
+    filename = f"{uuid.uuid4()}.{ext}"
+    path = UPLOAD_DIR / filename
+    with path.open("wb") as f:
+        shutil.copyfileobj(file.file, f)
+    # URL served via /uploads/<filename>
+    return {"url": f"/uploads/{filename}", "filename": filename, "size": path.stat().st_size}
+
+# ---------- Billing settings (placeholder for Asaas/PayPal credentials) ----------
+class BillingSettings(BaseModel):
+    asaas_api_key: Optional[str] = None
+    asaas_environment: str = "production"  # production | sandbox
+    asaas_webhook_token: Optional[str] = None
+    paypal_client_id: Optional[str] = None
+    paypal_client_secret: Optional[str] = None
+    paypal_environment: str = "live"  # live | sandbox
+    paypal_webhook_id: Optional[str] = None
+    enabled_methods: List[str] = []  # ["pix", "boleto", "credit_card", "paypal"]
+
+@api.get("/billing/settings")
+async def get_billing_settings(user: dict = Depends(require_super_admin())):
+    doc = await db.billing_settings.find_one({"id": "global"}, {"_id": 0}) or {}
+    # mask secrets
+    out = {**doc}
+    for k in ("asaas_api_key", "asaas_webhook_token", "paypal_client_secret"):
+        if out.get(k):
+            v = out[k]
+            out[k] = v[:6] + "•" * (len(v) - 10) + v[-4:] if len(v) > 12 else "••••"
+            out[f"{k}_set"] = True
+        else:
+            out[f"{k}_set"] = False
+    return out
+
+@api.put("/billing/settings")
+async def update_billing_settings(body: BillingSettings, user: dict = Depends(require_super_admin())):
+    payload = body.dict(exclude_unset=True)
+    # Don't overwrite secrets if a masked value was sent back
+    existing = await db.billing_settings.find_one({"id": "global"}) or {}
+    for k in ("asaas_api_key", "asaas_webhook_token", "paypal_client_secret"):
+        if k in payload and payload[k] and "•" in str(payload[k]):
+            payload[k] = existing.get(k)  # keep existing
+    await db.billing_settings.update_one({"id": "global"}, {"$set": {"id": "global", **payload}}, upsert=True)
+    await write_audit(user, "update", "billing_settings", "global", "Configurações de cobrança", {"fields": list(payload.keys())})
+    return {"ok": True}
 
 # ---------- Permissions metadata ----------
 @api.get("/permissions")
@@ -964,6 +1125,24 @@ async def seed_data():
             })
         elif not verify_password(sa_pw, existing["password_hash"]):
             await db.users.update_one({"id": existing["id"]}, {"$set": {"password_hash": hash_password(sa_pw)}})
+
+    # Default plans (only seed if none exist)
+    if await db.plans.count_documents({}) == 0:
+        plans = [
+            {"id": str(uuid.uuid4()), "name": "Basic", "description": "Ideal para times pequenos",
+             "monthly_price": 99.0, "max_users": 5, "max_agents": 5,
+             "features": ["Dashboard", "Gravações", "Relatórios", "1 fila"],
+             "active": True, "created_at": datetime.now(timezone.utc).isoformat()},
+            {"id": str(uuid.uuid4()), "name": "Pro", "description": "Para operações em crescimento",
+             "monthly_price": 299.0, "max_users": 25, "max_agents": 25,
+             "features": ["Tudo do Basic", "5 filas", "Painel TV", "Exportação de relatórios", "Análise de abandonos"],
+             "active": True, "created_at": datetime.now(timezone.utc).isoformat()},
+            {"id": str(uuid.uuid4()), "name": "Enterprise", "description": "Sem limites para grandes operações",
+             "monthly_price": 799.0, "max_users": 999, "max_agents": 999,
+             "features": ["Tudo do Pro", "Filas ilimitadas", "Suporte prioritário", "SLA dedicado", "White-label"],
+             "active": True, "created_at": datetime.now(timezone.utc).isoformat()},
+        ]
+        await db.plans.insert_many(plans)
 
     # Demo tenants
     if os.environ.get("SEED_TENANT_DEMO", "").lower() == "true":

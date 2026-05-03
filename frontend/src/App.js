@@ -16,6 +16,8 @@ import TvPanel from "./pages/TvPanel";
 import Users from "./pages/Users";
 import AuditLogs from "./pages/AuditLogs";
 import Tenants from "./pages/Tenants";
+import Plans from "./pages/Plans";
+import BillingSettings from "./pages/BillingSettings";
 
 function App() {
   return (
@@ -34,6 +36,8 @@ function App() {
             <Route path="/users" element={<ProtectedRoute><Users /></ProtectedRoute>} />
             <Route path="/audit" element={<ProtectedRoute><AuditLogs /></ProtectedRoute>} />
             <Route path="/tenants" element={<ProtectedRoute><Tenants /></ProtectedRoute>} />
+            <Route path="/plans" element={<ProtectedRoute><Plans /></ProtectedRoute>} />
+            <Route path="/billing" element={<ProtectedRoute><BillingSettings /></ProtectedRoute>} />
           </Routes>
           <Toaster richColors position="top-right" />
         </BrowserRouter>

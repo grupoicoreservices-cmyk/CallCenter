@@ -7,6 +7,9 @@ import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Switch } from "../components/ui/switch";
 import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from "../components/ui/select";
+import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from "../components/ui/dialog";
 import {
@@ -113,6 +116,18 @@ export default function Tenants() {
               </div>
             </div>
 
+            {(t.contract_value || t.payment_status) && (
+              <div className="mt-3 pt-3 border-t border-border flex items-center justify-between">
+                {t.contract_value && (
+                  <div>
+                    <div className="text-[10px] text-muted-foreground uppercase tracking-widest font-medium">Contrato</div>
+                    <div className="font-mono text-sm mt-0.5">R$ {Number(t.contract_value).toFixed(2)}<span className="text-muted-foreground text-xs">/mês</span></div>
+                  </div>
+                )}
+                {t.payment_status && <PaymentBadge status={t.payment_status} />}
+              </div>
+            )}
+
             <div className="text-[10px] text-muted-foreground mt-3 font-mono">criado em {fmtDateTime(t.created_at)}</div>
 
             <div className="flex items-center gap-1 mt-4 pt-4 border-t border-border">
@@ -150,84 +165,161 @@ export default function Tenants() {
   );
 }
 
+const PAY_STATUS_MAP = {
+  paid:    { label: "Pago",      cls: "bg-emerald-100 text-emerald-700" },
+  pending: { label: "Pendente",  cls: "bg-amber-100 text-amber-700" },
+  overdue: { label: "Atrasado",  cls: "bg-red-100 text-red-700" },
+  trial:   { label: "Trial",     cls: "bg-blue-100 text-blue-700" },
+};
+function PaymentBadge({ status }) {
+  const m = PAY_STATUS_MAP[status] || PAY_STATUS_MAP.pending;
+  return <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-medium uppercase tracking-wider ${m.cls}`}>{m.label}</span>;
+}
+
 function TenantFormDialog({ open, editing, onClose, onSaved }) {
   const isNew = editing === "new";
   const initial = useMemo(() => {
-    if (isNew || !editing) return { domain: "", name: "", accent_color: "#0EA5E9", logo_url: "", timezone: "America/Sao_Paulo", max_users: 50, max_agents: 50, active: true };
-    return { ...editing, logo_url: editing.logo_url || "" };
+    if (isNew || !editing) return {
+      domain: "", name: "", accent_color: "#0EA5E9", logo_url: "",
+      timezone: "America/Sao_Paulo", max_users: 50, max_agents: 50, active: true,
+      plan_id: null, contract_value: "", contract_start: "", contract_end: "", payment_status: "pending",
+    };
+    return { ...editing, logo_url: editing.logo_url || "",
+             contract_value: editing.contract_value || "",
+             contract_start: editing.contract_start || "",
+             contract_end: editing.contract_end || "",
+             payment_status: editing.payment_status || "pending" };
   }, [editing, isNew]);
   const [form, setForm] = useState(initial);
+  const [plans, setPlans] = useState([]);
   const [saving, setSaving] = useState(false);
+  const [uploading, setUploading] = useState(false);
   const [err, setErr] = useState("");
 
   useEffect(() => { setForm(initial); setErr(""); }, [initial]);
+  useEffect(() => { if (open) api.get("/plans").then(r => setPlans(r.data.plans)).catch(() => {}); }, [open]);
+
+  async function uploadLogo(file) {
+    if (!file) return;
+    setUploading(true);
+    try {
+      const fd = new FormData(); fd.append("file", file);
+      const { data } = await api.post("/uploads/logo", fd, { headers: { "Content-Type": "multipart/form-data" } });
+      const url = data.url.startsWith("http") ? data.url : `${process.env.REACT_APP_BACKEND_URL}${data.url}`;
+      setForm({ ...form, logo_url: url });
+      toast.success("Logo carregado");
+    } catch (e) { toast.error(formatApiError(e.response?.data?.detail) || "Erro no upload"); }
+    finally { setUploading(false); }
+  }
+
+  function pickPlan(plan_id) {
+    const p = plans.find(x => x.id === plan_id);
+    setForm({
+      ...form, plan_id,
+      ...(p ? { max_users: p.max_users, max_agents: p.max_agents, contract_value: p.monthly_price } : {}),
+    });
+  }
 
   async function save() {
     setErr(""); setSaving(true);
     try {
-      const payload = { ...form, logo_url: form.logo_url || null };
-      if (isNew) {
-        await api.post("/tenants", payload);
-        toast.success("Tenant criado");
-      } else {
-        // omit domain (immutable)
-        const { domain, ...rest } = payload;
-        await api.patch(`/tenants/${editing.id}`, rest);
-        toast.success("Tenant atualizado");
-      }
+      const payload = {
+        ...form,
+        logo_url: form.logo_url || null,
+        contract_value: form.contract_value === "" ? null : parseFloat(form.contract_value),
+        contract_start: form.contract_start || null,
+        contract_end: form.contract_end || null,
+        plan_id: form.plan_id || null,
+      };
+      if (isNew) { await api.post("/tenants", payload); toast.success("Tenant criado"); }
+      else { const { domain, ...rest } = payload; await api.patch(`/tenants/${editing.id}`, rest); toast.success("Tenant atualizado"); }
       onSaved();
-    } catch (e) {
-      setErr(formatApiError(e.response?.data?.detail) || "Erro ao salvar");
-    } finally { setSaving(false); }
+    } catch (e) { setErr(formatApiError(e.response?.data?.detail) || "Erro ao salvar"); }
+    finally { setSaving(false); }
   }
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-lg" data-testid="tenant-form">
+      <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto" data-testid="tenant-form">
         <DialogHeader>
           <DialogTitle>{isNew ? "Novo Tenant" : `Editar ${editing?.name || ""}`}</DialogTitle>
-          <DialogDescription>Configure domínio, marca, limites e status do tenant.</DialogDescription>
+          <DialogDescription>Configure marca, contrato, limites e status.</DialogDescription>
         </DialogHeader>
 
+        {/* Identidade */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           <div className="space-y-1.5 md:col-span-2">
             <Label>Domínio (FusionPBX)</Label>
             <Input value={form.domain} onChange={(e) => setForm({ ...form, domain: e.target.value })} disabled={!isNew} placeholder="empresa.com.br" data-testid="tf-domain" />
           </div>
-          <div className="space-y-1.5 md:col-span-2">
-            <Label>Nome da empresa</Label>
-            <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} data-testid="tf-name" />
-          </div>
-          <div className="space-y-1.5">
-            <Label>Cor de destaque</Label>
+          <div className="space-y-1.5 md:col-span-2"><Label>Nome da empresa</Label>
+            <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} data-testid="tf-name" /></div>
+          <div className="space-y-1.5"><Label>Cor de destaque</Label>
             <div className="flex gap-2">
-              <input type="color" value={form.accent_color} onChange={(e) => setForm({ ...form, accent_color: e.target.value })}
-                     className="h-9 w-14 rounded border border-border cursor-pointer" data-testid="tf-color" />
+              <input type="color" value={form.accent_color} onChange={(e) => setForm({ ...form, accent_color: e.target.value })} className="h-9 w-14 rounded border border-border cursor-pointer" />
               <Input value={form.accent_color} onChange={(e) => setForm({ ...form, accent_color: e.target.value })} className="font-mono" />
             </div>
           </div>
-          <div className="space-y-1.5">
-            <Label>Logo URL (opcional)</Label>
-            <Input value={form.logo_url} onChange={(e) => setForm({ ...form, logo_url: e.target.value })} placeholder="https://…" data-testid="tf-logo" />
+          <div className="space-y-1.5"><Label>Logo (upload)</Label>
+            <div className="flex gap-2 items-center">
+              <input type="file" accept="image/*" onChange={(e) => uploadLogo(e.target.files?.[0])} className="text-xs" data-testid="tf-logo-file" />
+              {form.logo_url && <img src={form.logo_url} alt="logo" className="w-9 h-9 rounded object-cover border border-border" />}
+            </div>
+            {uploading && <div className="text-[10px] text-muted-foreground mt-1">enviando…</div>}
           </div>
-          <div className="space-y-1.5">
-            <Label>Limite de usuários</Label>
-            <Input type="number" min={1} value={form.max_users} onChange={(e) => setForm({ ...form, max_users: parseInt(e.target.value) || 1 })} data-testid="tf-max-users" />
+        </div>
+
+        {/* Contrato / Plano */}
+        <div className="border-t border-border pt-4 mt-2">
+          <div className="text-[10px] text-muted-foreground uppercase tracking-widest font-medium mb-3">Plano e Contrato</div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div className="space-y-1.5 md:col-span-2"><Label>Plano</Label>
+              <Select value={form.plan_id || "none"} onValueChange={(v) => pickPlan(v === "none" ? null : v)}>
+                <SelectTrigger data-testid="tf-plan"><SelectValue placeholder="Sem plano" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">— Sem plano (contrato customizado) —</SelectItem>
+                  {plans.filter(p => p.active).map(p => (
+                    <SelectItem key={p.id} value={p.id}>{p.name} · R$ {p.monthly_price.toFixed(2)} · {p.max_users >= 999 ? "∞" : p.max_users} users</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5"><Label>Valor do contrato (R$/mês)</Label>
+              <Input type="number" step="0.01" value={form.contract_value} onChange={(e) => setForm({ ...form, contract_value: e.target.value })} placeholder="Custom price" data-testid="tf-contract-value" />
+            </div>
+            <div className="space-y-1.5"><Label>Status do pagamento</Label>
+              <Select value={form.payment_status} onValueChange={(v) => setForm({ ...form, payment_status: v })}>
+                <SelectTrigger data-testid="tf-payment-status"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="paid">Pago</SelectItem>
+                  <SelectItem value="pending">Pendente</SelectItem>
+                  <SelectItem value="overdue">Atrasado</SelectItem>
+                  <SelectItem value="trial">Trial</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5"><Label>Contrato início</Label>
+              <Input type="date" value={form.contract_start} onChange={(e) => setForm({ ...form, contract_start: e.target.value })} />
+            </div>
+            <div className="space-y-1.5"><Label>Contrato fim</Label>
+              <Input type="date" value={form.contract_end} onChange={(e) => setForm({ ...form, contract_end: e.target.value })} />
+            </div>
           </div>
-          <div className="space-y-1.5">
-            <Label>Limite de agentes</Label>
-            <Input type="number" min={1} value={form.max_agents} onChange={(e) => setForm({ ...form, max_agents: parseInt(e.target.value) || 1 })} data-testid="tf-max-agents" />
+        </div>
+
+        {/* Limites */}
+        <div className="border-t border-border pt-4">
+          <div className="text-[10px] text-muted-foreground uppercase tracking-widest font-medium mb-3">Limites</div>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5"><Label>Usuários</Label>
+              <Input type="number" min={1} value={form.max_users} onChange={(e) => setForm({ ...form, max_users: parseInt(e.target.value) || 1 })} /></div>
+            <div className="space-y-1.5"><Label>Agentes</Label>
+              <Input type="number" min={1} value={form.max_agents} onChange={(e) => setForm({ ...form, max_agents: parseInt(e.target.value) || 1 })} /></div>
           </div>
-          <div className="space-y-1.5 md:col-span-2">
-            <Label>Fuso horário</Label>
-            <Input value={form.timezone} onChange={(e) => setForm({ ...form, timezone: e.target.value })} placeholder="America/Sao_Paulo" />
-          </div>
-          <div className="md:col-span-2">
-            <label className="flex items-center gap-2 text-sm cursor-pointer pt-2 border-t border-border">
-              <Switch checked={form.active} onCheckedChange={(v) => setForm({ ...form, active: v })} data-testid="tf-active" />
-              Tenant ativo
-            </label>
-          </div>
+          <label className="flex items-center gap-2 text-sm cursor-pointer pt-3 mt-3 border-t border-border">
+            <Switch checked={form.active} onCheckedChange={(v) => setForm({ ...form, active: v })} data-testid="tf-active" />
+            Tenant ativo
+          </label>
         </div>
 
         {err && <div className="text-sm text-red-700 bg-red-50 border border-red-200 px-3 py-2 rounded">{err}</div>}
