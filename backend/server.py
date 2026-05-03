@@ -394,6 +394,42 @@ async def tenant_stats(tid: str, user: dict = Depends(require_super_admin())):
         },
     }
 
+# ---------- Plan Features Catalog ----------
+PLAN_FEATURES_CATALOG = [
+    {"group": "Operação", "key": "dashboard",            "label": "Dashboard analítico",            "description": "KPIs, gráficos e abandonos"},
+    {"group": "Operação", "key": "realtime",             "label": "Monitor em Tempo Real",          "description": "Chamadas ao vivo + status agentes"},
+    {"group": "Operação", "key": "tv_panel",             "label": "Painel TV (wallboard)",          "description": "Modo TV com auto-refresh"},
+    {"group": "Operação", "key": "tv_customization",     "label": "Personalização Painel TV",       "description": "Temas, rotação, alertas sonoros"},
+    {"group": "Gravações","key": "recordings",           "label": "Gravações de chamadas",          "description": "Acesso ao acervo de gravações"},
+    {"group": "Gravações","key": "recordings_download",  "label": "Download de gravações",          "description": "Baixar arquivos de áudio"},
+    {"group": "Gravações","key": "recordings_notes",     "label": "Anotações em gravações",         "description": "Adicionar comentários por chamada"},
+    {"group": "Gravações","key": "ai_analysis",          "label": "Análise por IA (sentimento)",    "description": "Transcrição + score de qualidade"},
+    {"group": "Filas",    "key": "queues_view",          "label": "Visualizar filas",               "description": "Estatísticas e fila atual"},
+    {"group": "Filas",    "key": "queues_edit",          "label": "Editar filas",                   "description": "Criar/configurar filas"},
+    {"group": "Filas",    "key": "abandoned_analytics",  "label": "Análise de abandonos",           "description": "Por hora/dia/semana e tipo"},
+    {"group": "Agentes",  "key": "agents_view",          "label": "Listar agentes",                 "description": "Visualizar equipe"},
+    {"group": "Agentes",  "key": "agents_edit",          "label": "Gerenciar agentes",              "description": "Editar perfis e status"},
+    {"group": "Agentes",  "key": "agent_scoring",        "label": "Performance/CSAT por agente",    "description": "Ranking e métricas"},
+    {"group": "Relatórios","key":"reports",              "label": "Relatórios padrão",              "description": "6 tipos de relatório"},
+    {"group": "Relatórios","key":"reports_export",       "label": "Exportar Excel/PDF",             "description": "Download de relatórios"},
+    {"group": "Relatórios","key":"custom_reports",       "label": "Relatórios customizados",        "description": "Criar relatórios sob medida"},
+    {"group": "Administração","key":"users_management",  "label": "Gerenciar usuários",             "description": "CRUD de usuários e permissões"},
+    {"group": "Administração","key":"audit_logs",        "label": "Logs de auditoria",              "description": "Histórico de ações"},
+    {"group": "Administração","key":"multi_supervisor",  "label": "Múltiplos supervisores",         "description": "Mais de 1 supervisor"},
+    {"group": "Marca",    "key": "white_label",          "label": "White-label",                    "description": "Logo + cor próprios"},
+    {"group": "Marca",    "key": "custom_domain",        "label": "Domínio personalizado",          "description": "Acesso por domínio próprio"},
+    {"group": "Integrações","key":"api_access",          "label": "Acesso à API REST",              "description": "Tokens de API para integração"},
+    {"group": "Integrações","key":"webhooks",            "label": "Webhooks",                       "description": "Notificações de eventos"},
+    {"group": "Suporte",  "key": "support_email",        "label": "Suporte por email",              "description": "Resposta em até 48h"},
+    {"group": "Suporte",  "key": "support_priority",     "label": "Suporte prioritário",            "description": "Resposta em até 4h"},
+    {"group": "Suporte",  "key": "support_dedicated",    "label": "Gerente dedicado",               "description": "Atendimento exclusivo"},
+    {"group": "Suporte",  "key": "sla_99",               "label": "SLA 99,9%",                      "description": "Disponibilidade garantida"},
+]
+
+@api.get("/plans/features-catalog")
+async def plans_features_catalog(user: dict = Depends(get_current_user)):
+    return {"features": PLAN_FEATURES_CATALOG}
+
 # ---------- Plans (super admin) ----------
 @api.get("/plans")
 async def list_plans(user: dict = Depends(get_current_user)):
@@ -1131,15 +1167,18 @@ async def seed_data():
         plans = [
             {"id": str(uuid.uuid4()), "name": "Basic", "description": "Ideal para times pequenos",
              "monthly_price": 99.0, "max_users": 5, "max_agents": 5,
-             "features": ["Dashboard", "Gravações", "Relatórios", "1 fila"],
+             "features": ["dashboard", "recordings", "reports", "queues_view", "agents_view", "support_email"],
              "active": True, "created_at": datetime.now(timezone.utc).isoformat()},
             {"id": str(uuid.uuid4()), "name": "Pro", "description": "Para operações em crescimento",
              "monthly_price": 299.0, "max_users": 25, "max_agents": 25,
-             "features": ["Tudo do Basic", "5 filas", "Painel TV", "Exportação de relatórios", "Análise de abandonos"],
+             "features": ["dashboard", "realtime", "recordings", "recordings_download", "recordings_notes",
+                          "reports", "reports_export", "queues_view", "queues_edit", "abandoned_analytics",
+                          "agents_view", "agents_edit", "agent_scoring", "tv_panel", "audit_logs",
+                          "users_management", "support_email"],
              "active": True, "created_at": datetime.now(timezone.utc).isoformat()},
             {"id": str(uuid.uuid4()), "name": "Enterprise", "description": "Sem limites para grandes operações",
              "monthly_price": 799.0, "max_users": 999, "max_agents": 999,
-             "features": ["Tudo do Pro", "Filas ilimitadas", "Suporte prioritário", "SLA dedicado", "White-label"],
+             "features": [f["key"] for f in PLAN_FEATURES_CATALOG],
              "active": True, "created_at": datetime.now(timezone.utc).isoformat()},
         ]
         await db.plans.insert_many(plans)
