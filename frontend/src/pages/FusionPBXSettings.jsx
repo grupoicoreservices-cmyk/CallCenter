@@ -8,10 +8,6 @@ import { Switch } from "../components/ui/switch";
 import { Phone, Save, RefreshCw, CheckCircle2, AlertCircle, Server, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "../contexts/AuthContext";
-import {
-  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
-  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger,
-} from "../components/ui/alert-dialog";
 
 export default function FusionPBXSettings() {
   const { user, tenantContext } = useAuth();
@@ -184,29 +180,9 @@ export default function FusionPBXSettings() {
             <Button variant="default" onClick={sync} disabled={syncing || !form.enabled || !meta.configured} data-testid="fpbx-sync">
               <RefreshCw size={14} className="mr-1.5" />{syncing ? "Sincronizando…" : "Sincronizar Agora"}
             </Button>
-            <AlertDialog>
-              <AlertDialogTrigger asChild>
-                <Button variant="outline" className="text-red-600 border-red-200 hover:bg-red-50 ml-auto" data-testid="fpbx-clear-demo">
-                  <Trash2 size={14} className="mr-1.5" /> Limpar dados simulados
-                </Button>
-              </AlertDialogTrigger>
-              <AlertDialogContent>
-                <AlertDialogHeader>
-                  <AlertDialogTitle>Limpar dados simulados?</AlertDialogTitle>
-                  <AlertDialogDescription>
-                    Esta ação remove <strong>agentes, filas, chamadas e gravações</strong> que foram criadas como dados de demonstração (que não vieram da sincronização com a Central PBX real).
-                    <br/><br/>
-                    Os dados reais sincronizados do seu servidor PBX <strong>NÃO serão afetados</strong>.
-                    <br/><br/>
-                    Esta ação não pode ser desfeita.
-                  </AlertDialogDescription>
-                </AlertDialogHeader>
-                <AlertDialogFooter>
-                  <AlertDialogCancel>Cancelar</AlertDialogCancel>
-                  <AlertDialogAction onClick={clearDemo} className="bg-red-600 hover:bg-red-700">Sim, limpar simulados</AlertDialogAction>
-                </AlertDialogFooter>
-              </AlertDialogContent>
-            </AlertDialog>
+            <Button variant="outline" onClick={clearDemo} className="text-red-600 border-red-200 hover:bg-red-50 ml-auto" data-testid="fpbx-clear-demo">
+              <Trash2 size={14} className="mr-1.5" /> Limpar dados simulados
+            </Button>
           </div>
         </div>
 
