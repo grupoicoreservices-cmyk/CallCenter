@@ -19,7 +19,7 @@ export default function FusionPBXSettings() {
   const qs = activeTenantId ? `?tenant_id=${activeTenantId}` : "";
   const [form, setForm] = useState({
     enabled: false, base_url: "", api_key: "", username: "", password: "",
-    domain_uuid: "", domain_name: "", verify_ssl: true, sync_interval_minutes: 5,
+    domain_uuid: "", domain_name: "", verify_ssl: true, sync_interval_minutes: 1,
   });
   const [meta, setMeta] = useState({});
   const [saving, setSaving] = useState(false);
@@ -35,7 +35,7 @@ export default function FusionPBXSettings() {
         api_key: "", username: data.username || "", password: "",
         domain_uuid: data.domain_uuid || "", domain_name: data.domain_name || "",
         verify_ssl: data.verify_ssl !== false,
-        sync_interval_minutes: data.sync_interval_minutes || 5,
+        sync_interval_minutes: data.sync_interval_minutes || 1,
       });
       setMeta({
         configured: data.configured, api_key_set: data.api_key_set, password_set: data.password_set,
@@ -219,7 +219,7 @@ export default function FusionPBXSettings() {
           <div className="grid grid-cols-2 gap-3">
             <div><Label>Intervalo Sync (min)</Label>
               <Input type="number" min={1} value={form.sync_interval_minutes}
-                     onChange={(e) => setForm({ ...form, sync_interval_minutes: parseInt(e.target.value) || 5 })} />
+                     onChange={(e) => setForm({ ...form, sync_interval_minutes: parseInt(e.target.value) || 1 })} />
             </div>
           </div>
 
@@ -293,9 +293,20 @@ function DiagnosticsPanel({ diag, loading, onReload }) {
   const { settings: s, counts, recent_calls: calls, recent_agents: agents, recent_queues: queues, sync_history: history } = diag;
   const totalReal = (counts.agents?.real || 0) + (counts.queues?.real || 0) + (counts.calls?.real || 0);
   const receivingData = totalReal > 0;
+  const autoInterval = s.last_sync_summary?.sync_interval_minutes || 1;
 
   return (
     <div className="space-y-4">
+      {/* Auto-sync banner */}
+      {s.enabled && (
+        <div className="border border-emerald-200 bg-emerald-50 rounded-sm p-3 flex items-center gap-3 text-sm">
+          <RefreshCw size={14} className="text-emerald-600 animate-spin" style={{ animationDuration: "3s" }} />
+          <span className="text-emerald-900">
+            <strong>Sincronização automática ativa</strong> — cada alteração no FusionPBX (fila, agente, chamada) é importada a cada {autoInterval} min.
+          </span>
+        </div>
+      )}
+
       {/* Banner de status geral */}
       <div className={`border rounded-sm p-4 flex items-start gap-3 ${receivingData ? "border-emerald-200 bg-emerald-50" : "border-amber-200 bg-amber-50"}`}>
         {receivingData ? <CheckCircle2 size={20} className="text-emerald-600 mt-0.5" /> : <AlertCircle size={20} className="text-amber-600 mt-0.5" />}

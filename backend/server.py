@@ -1688,76 +1688,20 @@ async def fusion_clear_demo_data(user: dict = Depends(get_current_user), tenant_
     return {"ok": True, "deleted": deleted, "tenant_id": tid}
 
 
-@api.get("/fusionpbx/diagnostics")
-async def fusion_diagnostics(user: dict = Depends(get_current_user), tenant_id: Optional[str] = None):
-    """Returns comprehensive status: settings, last sync, counts of real vs demo data,
-    and the latest synced records so the admin can verify data is coming in."""
-    tid = await _resolve_tenant_for_fusion(user, tenant_id)
-    if user.get("role") not in ("super_admin", "admin"):
-        raise HTTPException(status_code=403, detail="Sem permissão")
-
-    settings = await db.fusionpbx_settings.find_one({"tenant_id": tid}, {"_id": 0}) or {}
-
-    async def _count_real_vs_demo(col: str) -> Dict[str, int]:
-        real = await db[col].count_documents({"tenant_id": tid, "external_id": {"$exists": True, "$ne": None}})
-        demo = await db[col].count_documents({"tenant_id": tid, "$or": [{"external_id": {"$exists": False}}, {"external_id": None}]})
-        return {"real": real, "demo": demo, "total": real + demo}
-
-    counts = {
-        "agents": await _count_real_vs_demo("agents"),
-        "queues": await _count_real_vs_demo("queues"),
-        "calls": await _count_real_vs_demo("calls"),
-        "recordings": await _count_real_vs_demo("recordings"),
-    }
-
-    # Last 10 synced calls, 10 agents, 50 queues
-    recent_real_calls = await db.calls.find(
-        {"tenant_id": tid, "external_id": {"$exists": True, "$ne": None}}, {"_id": 0}
-    ).sort("started_at", -1).to_list(10)
-    recent_real_agents = await db.agents.find(
-        {"tenant_id": tid, "external_id": {"$exists": True, "$ne": None}}, {"_id": 0}
-    ).sort("updated_at", -1).to_list(10)
-    recent_real_queues = await db.queues.find(
-        {"tenant_id": tid, "external_id": {"$exists": True, "$ne": None}}, {"_id": 0}
-    ).to_list(50)
-
-    # Audit log of recent syncs
-    sync_history = await db.audit_logs.find(
-        {"tenant_id": tid, "resource": "fusionpbx", "action": "sync"}, {"_id": 0}
-    ).sort("created_at", -1).to_list(5)
-
-    return {
-        "tenant_id": tid,
-        "settings": {
-            "enabled": settings.get("enabled", False),
-            "configured": bool(settings.get("base_url")),
-            "base_url": settings.get("base_url"),
-            "domain_uuid": settings.get("domain_uuid"),
-            "domain_name": settings.get("domain_name"),
-            "last_sync_at": settings.get("last_sync_at"),
-            "last_sync_status": settings.get("last_sync_status"),
-            "last_sync_summary": settings.get("last_sync_summary", {}),
-        },
-        "counts": counts,
-        "recent_calls": recent_real_calls,
-        "recent_agents": recent_real_agents,
-        "recent_queues": recent_real_queues,
-        "sync_history": sync_history,
-    }
-
-
-
-@api.post("/fusionpbx/sync")
-async def fusion_sync(user: dict = Depends(get_current_user), tenant_id: Optional[str] = None,
-                      cdr_limit: int = 200):
-    """Sync extensions, queues, agents and recent CDR from FusionPBX into our DB."""
-    tid = await _resolve_tenant_for_fusion(user, tenant_id)
-    if user.get("role") not in ("super_admin", "admin"):
-        raise HTTPException(status_code=403, detail="Sem permissão")
-    client = await _build_fusion_client(tid)
+async def _run_sync_for_tenant(tid: str, cdr_limit: int = 200) -> Dict[str, Any]:
+    """Core sync logic reusable by manual endpoint + scheduler."""
+    s = await db.fusionpbx_settings.find_one({"tenant_id": tid})
+    if not s or not s.get("enabled") or not s.get("base_url"):
+        return {"skipped": True, "reason": "not_enabled"}
+    client = FusionPBXClient(
+        base_url=s["base_url"], api_key=s.get("api_key"),
+        username=s.get("username"), password=s.get("password"),
+        domain_uuid=s.get("domain_uuid"), domain_name=s.get("domain_name"),
+        verify_ssl=bool(s.get("verify_ssl", True)),
+    )
     summary = {"agents_synced": 0, "queues_synced": 0, "calls_synced": 0,
                "errors": [], "started_at": datetime.now(timezone.utc).isoformat()}
-    # Extensions -> agents (only if not already mapped)
+    # Extensions
     try:
         exts = await client.list_extensions()
         for raw in exts:
@@ -1843,7 +1787,6 @@ async def fusion_sync(user: dict = Depends(get_current_user), tenant_id: Optiona
             else:
                 doc["id"] = str(uuid.uuid4())
                 await db.calls.insert_one(doc)
-                # Build a recording entry if there's a recording_uuid and disposition was answered
                 if n.get("recording_uuid") and n["disposition"] == "answered":
                     rec_url = await client.get_recording_url(n["recording_uuid"])
                     await db.recordings.insert_one({
@@ -1866,8 +1809,141 @@ async def fusion_sync(user: dict = Depends(get_current_user), tenant_id: Optiona
         {"$set": {"last_sync_at": summary["finished_at"], "last_sync_status": summary["status"],
                   "last_sync_summary": summary}},
     )
+    return summary
+
+
+_SYNC_SCHEDULER_STATE = {"running": False, "last_run": None, "enabled": True}
+
+
+async def _fusionpbx_scheduler():
+    """Background task that syncs all enabled tenants every minute."""
+    await asyncio.sleep(30)  # small delay on startup
+    while _SYNC_SCHEDULER_STATE["enabled"]:
+        try:
+            tenants_to_sync = await db.fusionpbx_settings.find(
+                {"enabled": True, "base_url": {"$ne": ""}},
+                {"_id": 0, "tenant_id": 1, "sync_interval_minutes": 1, "last_sync_at": 1},
+            ).to_list(1000)
+            now = datetime.now(timezone.utc)
+            for t in tenants_to_sync:
+                tid = t["tenant_id"]
+                interval_min = max(1, int(t.get("sync_interval_minutes") or 1))
+                last = t.get("last_sync_at")
+                if last:
+                    try:
+                        last_dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
+                        if (now - last_dt).total_seconds() < interval_min * 60 - 5:
+                            continue
+                    except Exception:
+                        pass
+                logger.info("[scheduler] Syncing tenant %s (interval=%dmin)", tid, interval_min)
+                try:
+                    result = await _run_sync_for_tenant(tid)
+                    if not result.get("skipped"):
+                        logger.info("[scheduler] Synced %s: %d agents, %d queues, %d calls",
+                                    tid, result.get("agents_synced", 0),
+                                    result.get("queues_synced", 0), result.get("calls_synced", 0))
+                except Exception as e:
+                    logger.exception("[scheduler] Erro no tenant %s: %s", tid, e)
+            _SYNC_SCHEDULER_STATE["last_run"] = now.isoformat()
+        except Exception as e:
+            logger.exception("[scheduler] Falha: %s", e)
+        await asyncio.sleep(30)  # check every 30s; per-tenant interval gate handles frequency
+
+
+@api.get("/fusionpbx/scheduler/status")
+async def fusion_scheduler_status(user: dict = Depends(get_current_user)):
+    if user.get("role") not in ("super_admin", "admin"):
+        raise HTTPException(status_code=403, detail="Sem permissão")
+    enabled_tenants = await db.fusionpbx_settings.count_documents(
+        {"enabled": True, "base_url": {"$ne": ""}}
+    )
+    return {
+        "running": _SYNC_SCHEDULER_STATE["running"] or True,  # if backend is up, scheduler is up
+        "last_check": _SYNC_SCHEDULER_STATE.get("last_run"),
+        "enabled_tenants": enabled_tenants,
+    }
+
+
+@api.get("/fusionpbx/diagnostics")
+async def fusion_diagnostics(user: dict = Depends(get_current_user), tenant_id: Optional[str] = None):
+    """Returns comprehensive status: settings, last sync, counts of real vs demo data,
+    and the latest synced records so the admin can verify data is coming in."""
+    tid = await _resolve_tenant_for_fusion(user, tenant_id)
+    if user.get("role") not in ("super_admin", "admin"):
+        raise HTTPException(status_code=403, detail="Sem permissão")
+
+    settings = await db.fusionpbx_settings.find_one({"tenant_id": tid}, {"_id": 0}) or {}
+
+    async def _count_real_vs_demo(col: str) -> Dict[str, int]:
+        real = await db[col].count_documents({"tenant_id": tid, "external_id": {"$exists": True, "$ne": None}})
+        demo = await db[col].count_documents({"tenant_id": tid, "$or": [{"external_id": {"$exists": False}}, {"external_id": None}]})
+        return {"real": real, "demo": demo, "total": real + demo}
+
+    counts = {
+        "agents": await _count_real_vs_demo("agents"),
+        "queues": await _count_real_vs_demo("queues"),
+        "calls": await _count_real_vs_demo("calls"),
+        "recordings": await _count_real_vs_demo("recordings"),
+    }
+
+    # Last 10 synced calls, 10 agents, 50 queues
+    recent_real_calls = await db.calls.find(
+        {"tenant_id": tid, "external_id": {"$exists": True, "$ne": None}}, {"_id": 0}
+    ).sort("started_at", -1).to_list(10)
+    recent_real_agents = await db.agents.find(
+        {"tenant_id": tid, "external_id": {"$exists": True, "$ne": None}}, {"_id": 0}
+    ).sort("updated_at", -1).to_list(10)
+    recent_real_queues = await db.queues.find(
+        {"tenant_id": tid, "external_id": {"$exists": True, "$ne": None}}, {"_id": 0}
+    ).to_list(50)
+
+    # Audit log of recent syncs
+    sync_history = await db.audit_logs.find(
+        {"tenant_id": tid, "resource": "fusionpbx", "action": "sync"}, {"_id": 0}
+    ).sort("created_at", -1).to_list(5)
+
+    return {
+        "tenant_id": tid,
+        "settings": {
+            "enabled": settings.get("enabled", False),
+            "configured": bool(settings.get("base_url")),
+            "base_url": settings.get("base_url"),
+            "domain_uuid": settings.get("domain_uuid"),
+            "domain_name": settings.get("domain_name"),
+            "last_sync_at": settings.get("last_sync_at"),
+            "last_sync_status": settings.get("last_sync_status"),
+            "last_sync_summary": settings.get("last_sync_summary", {}),
+        },
+        "counts": counts,
+        "recent_calls": recent_real_calls,
+        "recent_agents": recent_real_agents,
+        "recent_queues": recent_real_queues,
+        "sync_history": sync_history,
+    }
+
+
+
+@api.post("/fusionpbx/sync")
+async def fusion_sync(user: dict = Depends(get_current_user), tenant_id: Optional[str] = None,
+                      cdr_limit: int = 200):
+    """Sync manual (chamado pelo botão 'Sincronizar Agora')."""
+    tid = await _resolve_tenant_for_fusion(user, tenant_id)
+    if user.get("role") not in ("super_admin", "admin"):
+        raise HTTPException(status_code=403, detail="Sem permissão")
+    s = await db.fusionpbx_settings.find_one({"tenant_id": tid})
+    if not s or not s.get("base_url"):
+        raise HTTPException(status_code=400, detail="FusionPBX não configurado para este tenant")
+    if not s.get("enabled", False):
+        raise HTTPException(status_code=400, detail="Integração FusionPBX desativada")
+    try:
+        summary = await _run_sync_for_tenant(tid, cdr_limit=cdr_limit)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Erro na sincronização: {e}")
     await write_audit(user, "sync", "fusionpbx", tid, "Sync FusionPBX",
-                      {"agents": summary["agents_synced"], "queues": summary["queues_synced"], "calls": summary["calls_synced"]})
+                      {"agents": summary.get("agents_synced", 0),
+                       "queues": summary.get("queues_synced", 0),
+                       "calls": summary.get("calls_synced", 0)})
     return summary
 
 
@@ -2031,6 +2107,9 @@ async def on_startup():
     await db.charges.create_index("external_id")
     await db.fusionpbx_settings.create_index("tenant_id", unique=True)
     await db.webhook_events.create_index([("source", 1), ("delivery_id", 1)])
+    # Start FusionPBX auto-sync scheduler (checks every 30s, syncs per-tenant based on interval)
+    asyncio.create_task(_fusionpbx_scheduler())
+    logger.info("FusionPBX auto-sync scheduler iniciado")
     await seed_data()
 
 @app.on_event("shutdown")
