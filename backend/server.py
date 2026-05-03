@@ -1521,6 +1521,31 @@ async def _run_update_task():
             append(f"❌ {APP_ROOT} não é um repositório Git. Clone via git para habilitar updates.")
             _UPDATE_STATE["success"] = False
             return
+        # Pre-flight: check write permissions
+        import os as _os
+        if not _os.access(str(APP_ROOT), _os.W_OK):
+            append(f"❌ Sem permissão de escrita em {APP_ROOT}")
+            append(f"   Rode na VPS: sudo chown -R voxyra:voxyra {APP_ROOT}")
+            _UPDATE_STATE["success"] = False
+            return
+        # Pre-flight: check sudo rights for supervisorctl
+        check = await asyncio.create_subprocess_shell(
+            "sudo -n supervisorctl status CallCenter-backend",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        _, sterr = await check.communicate()
+        if check.returncode != 0 and b"password" in sterr.lower():
+            append("❌ Sem permissão sudo para reiniciar o supervisor.")
+            append("   Rode na VPS (uma vez):")
+            append("   sudo tee /etc/sudoers.d/CallCenter-webupdate > /dev/null <<'EOF'")
+            append("   voxyra ALL=(ALL) NOPASSWD: /usr/bin/supervisorctl restart CallCenter-backend")
+            append("   voxyra ALL=(ALL) NOPASSWD: /usr/bin/supervisorctl reload")
+            append("   EOF")
+            append("   sudo chmod 0440 /etc/sudoers.d/CallCenter-webupdate")
+            _UPDATE_STATE["success"] = False
+            return
+        # Configure git safe.directory (idempotent, no permission needed for user config)
+        await run_cmd(f"git config --global --add safe.directory {APP_ROOT}", timeout=10)
         # git pull
         rc = await run_cmd(f"git -C {APP_ROOT} pull", timeout=120)
         if rc != 0: _UPDATE_STATE["success"] = False; return
@@ -1563,6 +1588,70 @@ async def system_info(user: dict = Depends(require_super_admin())):
         "git": git,
         "update_state": {k: _UPDATE_STATE.get(k) for k in ("running", "started_at", "finished_at", "success")},
     }
+
+
+@api.get("/system/update/preflight")
+async def system_update_preflight(user: dict = Depends(require_super_admin())):
+    """Check all permissions/prerequisites needed for web-based update. Returns fix commands."""
+    import os as _os, pwd
+    checks: List[Dict[str, Any]] = []
+    # 1. Git installed?
+    r = await asyncio.create_subprocess_shell("git --version", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    await r.communicate()
+    checks.append({"name": "Git instalado", "ok": r.returncode == 0, "fix": "sudo apt install -y git"})
+    # 2. APP_ROOT é repo git?
+    is_git = (APP_ROOT / ".git").exists()
+    checks.append({"name": f"{APP_ROOT} é repositório Git", "ok": is_git,
+                   "fix": f"Clone via: sudo rm -rf {APP_ROOT} && cd /opt && sudo git clone <URL> {APP_ROOT.name}"})
+    # 3. Owner
+    try:
+        stat = APP_ROOT.stat()
+        owner = pwd.getpwuid(stat.st_uid).pw_name
+        current_user = pwd.getpwuid(_os.getuid()).pw_name
+        checks.append({"name": f"Dono do diretório ({owner}) = usuário do backend ({current_user})",
+                       "ok": owner == current_user,
+                       "fix": f"sudo chown -R {current_user}:{current_user} {APP_ROOT}"})
+    except Exception as e:
+        checks.append({"name": "Verificação de dono", "ok": False, "fix": str(e)})
+    # 4. Escrita em APP_ROOT
+    checks.append({"name": f"Permissão de escrita em {APP_ROOT}",
+                   "ok": _os.access(str(APP_ROOT), _os.W_OK),
+                   "fix": f"sudo chown -R voxyra:voxyra {APP_ROOT}"})
+    # 5. sudoers supervisorctl
+    r = await asyncio.create_subprocess_shell(
+        "sudo -n supervisorctl status CallCenter-backend 2>&1",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+    )
+    out, _ = await r.communicate()
+    out_txt = out.decode("utf-8", errors="replace") if out else ""
+    sudo_ok = r.returncode == 0 or "RUNNING" in out_txt or "STOPPED" in out_txt
+    checks.append({
+        "name": "Sudo sem senha para supervisorctl",
+        "ok": sudo_ok,
+        "fix": (
+            "sudo tee /etc/sudoers.d/CallCenter-webupdate > /dev/null <<'EOF'\n"
+            "voxyra ALL=(ALL) NOPASSWD: /usr/bin/supervisorctl restart CallCenter-backend\n"
+            "voxyra ALL=(ALL) NOPASSWD: /usr/bin/supervisorctl reload\n"
+            "EOF\n"
+            "sudo chmod 0440 /etc/sudoers.d/CallCenter-webupdate"
+        ),
+    })
+    # 6. Git safe.directory
+    r = await asyncio.create_subprocess_shell(
+        f"git config --global --get-all safe.directory",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    sdo, _ = await r.communicate()
+    safe_ok = str(APP_ROOT) in (sdo.decode() if sdo else "")
+    checks.append({"name": "git safe.directory configurado", "ok": safe_ok,
+                   "fix": f"git config --global --add safe.directory {APP_ROOT}"})
+    # 7. yarn
+    r = await asyncio.create_subprocess_shell("yarn --version", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    await r.communicate()
+    checks.append({"name": "Yarn instalado", "ok": r.returncode == 0, "fix": "sudo npm install -g yarn"})
+
+    all_ok = all(c["ok"] for c in checks)
+    return {"all_ok": all_ok, "checks": checks}
 
 
 @api.post("/system/update/check")

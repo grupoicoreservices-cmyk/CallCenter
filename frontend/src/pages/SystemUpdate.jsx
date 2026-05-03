@@ -4,6 +4,7 @@ import Layout from "../components/Layout";
 import { Button } from "../components/ui/button";
 import {
   RefreshCw, Download, GitBranch, CheckCircle2, AlertCircle, Terminal, Shield, Clock,
+  Wrench, Copy,
 } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "../contexts/AuthContext";
@@ -52,6 +53,18 @@ export default function SystemUpdate() {
       loadInfo();
     } catch (e) { toast.error(formatApiError(e.response?.data?.detail) || "Erro"); }
     finally { setChecking(false); }
+  }
+
+  async function runPreflight() {
+    setCheckingPreflight(true);
+    setPreflight(null);
+    try {
+      const { data } = await api.get("/system/update/preflight");
+      setPreflight(data);
+      if (data.all_ok) toast.success("Todas as permissões OK ✓");
+      else toast.warning("Algumas permissões precisam ser corrigidas");
+    } catch (e) { toast.error(formatApiError(e.response?.data?.detail) || "Erro"); }
+    finally { setCheckingPreflight(false); }
   }
 
   async function startUpdate() {
@@ -158,11 +171,40 @@ export default function SystemUpdate() {
               <Button variant="outline" onClick={check} disabled={checking || updating || !hasGit} data-testid="btn-check-updates">
                 <RefreshCw size={14} className="mr-1.5" />{checking ? "Verificando…" : "Verificar atualizações"}
               </Button>
+              <Button variant="outline" onClick={runPreflight} disabled={checkingPreflight || updating} data-testid="btn-preflight">
+                <Wrench size={14} className="mr-1.5" />{checkingPreflight ? "Verificando…" : "Diagnosticar Permissões"}
+              </Button>
               <Button onClick={startUpdate} disabled={updating || !hasGit} data-testid="btn-run-update"
                       className={hasUpdates ? "bg-amber-600 hover:bg-amber-700" : ""}>
                 <Download size={14} className="mr-1.5" />{updating ? "Atualizando…" : (hasUpdates ? "Atualizar Agora" : "Forçar Atualização")}
               </Button>
             </div>
+            {preflight && (
+              <div className="mt-4 space-y-2">
+                <div className={`rounded-sm p-3 border text-sm ${preflight.all_ok ? "border-emerald-200 bg-emerald-50" : "border-amber-200 bg-amber-50"}`}>
+                  <div className="font-medium flex items-center gap-2">
+                    {preflight.all_ok ? <CheckCircle2 size={14} className="text-emerald-600" /> : <AlertCircle size={14} className="text-amber-600" />}
+                    {preflight.all_ok ? "Todas as permissões OK — atualização pela web pronta!" : "Algumas permissões precisam ser corrigidas"}
+                  </div>
+                </div>
+                {preflight.checks.map((c, i) => (
+                  <div key={i} className={`border rounded-sm p-3 text-sm ${c.ok ? "border-border bg-zinc-50" : "border-red-200 bg-red-50"}`}>
+                    <div className="flex items-center gap-2 font-medium">
+                      {c.ok ? <CheckCircle2 size={14} className="text-emerald-600" /> : <AlertCircle size={14} className="text-red-600" />}
+                      {c.name}
+                    </div>
+                    {!c.ok && c.fix && (
+                      <div className="mt-2 flex items-start gap-2">
+                        <pre className="flex-1 bg-zinc-950 text-zinc-300 font-mono text-[11px] p-2 rounded overflow-x-auto whitespace-pre-wrap break-all">{c.fix}</pre>
+                        <Button size="sm" variant="outline" onClick={() => { navigator.clipboard.writeText(c.fix); toast.success("Copiado"); }}>
+                          <Copy size={12} />
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
             {!hasGit && (
               <div className="mt-4 border border-amber-200 bg-amber-50 rounded-sm p-3 text-xs text-amber-900">
                 <strong>Instalado manualmente (sem Git):</strong> para habilitar atualização pela web, instale via <code className="font-mono bg-white px-1">git clone</code> em <code className="font-mono bg-white px-1">/opt/CallCenter</code>.
