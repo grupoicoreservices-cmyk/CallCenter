@@ -16,6 +16,8 @@ export default function SystemUpdate() {
   const [checking, setChecking] = useState(false);
   const [updating, setUpdating] = useState(false);
   const [status, setStatus] = useState(null);
+  const [preflight, setPreflight] = useState(null);
+  const [checkingPreflight, setCheckingPreflight] = useState(false);
   const logRef = useRef(null);
   const pollRef = useRef(null);
 
