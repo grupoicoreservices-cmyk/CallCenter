@@ -174,3 +174,10 @@ class FusionPBXDBClient:
                 return []
         finally:
             await conn.close()
+
+    async def get_recording_url(self, recording_uuid_or_name: str) -> str:
+        """Sem REST/HTTP a recording do FusionPBX só pode ser acessada via filesystem.
+        Retornamos um identificador local — o frontend faz download via endpoint
+        autenticado do Voxyra que pode buscar no PBX por SCP/SFTP futuramente.
+        Por ora, salvamos a referência (record_name) que aparece no v_xml_cdr."""
+        return f"fusionpbx://{recording_uuid_or_name}"

@@ -2049,7 +2049,10 @@ async def _fusionpbx_scheduler():
     while _SYNC_SCHEDULER_STATE["enabled"]:
         try:
             tenants_to_sync = await db.fusionpbx_settings.find(
-                {"enabled": True, "base_url": {"$ne": ""}},
+                {"enabled": True, "$or": [
+                    {"connection_type": "db", "db_host": {"$nin": [None, ""]}},
+                    {"connection_type": {"$in": [None, "rest"]}, "base_url": {"$nin": [None, ""]}},
+                ]},
                 {"_id": 0, "tenant_id": 1, "sync_interval_minutes": 1, "last_sync_at": 1},
             ).to_list(1000)
             now = datetime.now(timezone.utc)
@@ -2084,7 +2087,10 @@ async def fusion_scheduler_status(user: dict = Depends(get_current_user)):
     if user.get("role") not in ("super_admin", "admin"):
         raise HTTPException(status_code=403, detail="Sem permissão")
     enabled_tenants = await db.fusionpbx_settings.count_documents(
-        {"enabled": True, "base_url": {"$ne": ""}}
+        {"enabled": True, "$or": [
+            {"connection_type": "db", "db_host": {"$nin": [None, ""]}},
+            {"connection_type": {"$in": [None, "rest"]}, "base_url": {"$nin": [None, ""]}},
+        ]}
     )
     return {
         "running": _SYNC_SCHEDULER_STATE["running"] or True,  # if backend is up, scheduler is up
