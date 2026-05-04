@@ -387,116 +387,126 @@ function UserFormDialog({ open, editing, permsMeta, agentEntities, queues, onClo
         </div>
 
         {form.role === "agent" && (
-          <div className="border-t border-border pt-4 mt-2">
-            <Label className="text-xs mb-1.5 block">
-              Vincular a um agente do callcenter
-              <span className="text-muted-foreground ml-1 font-normal normal-case">(define quais gravações o usuário verá)</span>
-            </Label>
-            <Select value={form.agent_id || "none"} onValueChange={(v) => setForm({ ...form, agent_id: v === "none" ? null : v })}>
-              <SelectTrigger data-testid="uf-agent-id"><SelectValue placeholder="Nenhum vínculo" /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="none">— Sem vínculo (não verá gravações) —</SelectItem>
-                {agentEntities.map((a) => <SelectItem key={a.id} value={a.id}>{a.name} · ext. {a.extension}</SelectItem>)}
-              </SelectContent>
-            </Select>
+          <div className="border border-blue-200 bg-blue-50/40 rounded-sm p-4 mt-3">
+            <div className="flex items-start gap-2 mb-3">
+              <div className="flex-1">
+                <div className="text-xs font-medium text-blue-900">
+                  Vincular a um agente sincronizado do FusionPBX
+                </div>
+                <div className="text-[11px] text-muted-foreground mt-0.5">
+                  Define quais gravações e métricas o usuário verá. Os agentes abaixo foram puxados da Central PBX.
+                </div>
+              </div>
+              {agentEntities.filter(a => a.external_id).length > 0 && (
+                <span className="text-[10px] uppercase tracking-widest font-medium text-emerald-700 bg-emerald-100 px-2 py-1 rounded-full whitespace-nowrap">
+                  {agentEntities.filter(a => a.external_id).length} sincronizados
+                </span>
+              )}
+            </div>
+            <AgentLinkPicker
+              agents={agentEntities}
+              value={form.agent_id}
+              onChange={(v) => setForm({ ...form, agent_id: v })}
+            />
           </div>
         )}
 
         {isNew && form.role === "agent" && (
-          <div className="border border-dashed border-emerald-300 bg-emerald-50/40 rounded-sm p-4 mt-3 space-y-3">
-            <div className="text-xs font-medium text-emerald-900">
-              Provisionamento no FusionPBX <span className="text-muted-foreground font-normal">(opcional)</span>
-            </div>
-
-            <label className="flex items-center gap-2 text-sm">
-              <Switch checked={form.provision_extension}
-                      onCheckedChange={(v) => setForm({ ...form, provision_extension: v })}
-                      data-testid="uf-prov-ext" />
-              Cadastrar ramal SIP no FusionPBX
-            </label>
-            {form.provision_extension && (
-              <div className="grid grid-cols-2 gap-2 ml-7">
-                <div>
-                  <Label className="text-[11px]">Número do ramal *</Label>
-                  <Input value={form.extension_number}
-                         onChange={(e) => setForm({ ...form, extension_number: e.target.value })}
-                         placeholder="1001" type="number" data-testid="uf-ext-number" />
-                </div>
-                <div>
-                  <Label className="text-[11px]">Senha SIP <span className="text-muted-foreground">(auto)</span></Label>
-                  <Input value={form.extension_sip_password}
-                         onChange={(e) => setForm({ ...form, extension_sip_password: e.target.value })}
-                         type="password" placeholder="gerada automaticamente" />
-                </div>
-              </div>
-            )}
-
-            <label className="flex items-center gap-2 text-sm">
-              <Switch checked={form.provision_call_center_agent}
-                      onCheckedChange={(v) => setForm({ ...form, provision_call_center_agent: v })}
-                      data-testid="uf-prov-cca" />
-              Cadastrar como agente do Call Center (com número/login real)
-            </label>
-            {form.provision_call_center_agent && (
-              <div className="ml-7 space-y-2">
-                <div className="grid grid-cols-2 gap-2">
+          <details className="border border-dashed border-zinc-300 bg-zinc-50 rounded-sm p-3 mt-3">
+            <summary className="text-xs font-medium text-zinc-700 cursor-pointer select-none">
+              ⚙️ Provisionamento avançado no FusionPBX <span className="text-muted-foreground font-normal">(opcional · expanda para criar ramal/agente direto no PBX)</span>
+            </summary>
+            <div className="mt-3 space-y-3">
+              <label className="flex items-center gap-2 text-sm">
+                <Switch checked={form.provision_extension}
+                        onCheckedChange={(v) => setForm({ ...form, provision_extension: v })}
+                        data-testid="uf-prov-ext" />
+                Cadastrar ramal SIP no FusionPBX
+              </label>
+              {form.provision_extension && (
+                <div className="grid grid-cols-2 gap-2 ml-7">
                   <div>
-                    <Label className="text-[11px]">Número/Login do agente <span className="text-muted-foreground">(default = ramal)</span></Label>
-                    <Input value={form.cc_agent_id}
-                           onChange={(e) => setForm({ ...form, cc_agent_id: e.target.value })}
-                           placeholder="ex: 1001 ou joao_silva" data-testid="uf-cc-agent-id" />
+                    <Label className="text-[11px]">Número do ramal *</Label>
+                    <Input value={form.extension_number}
+                           onChange={(e) => setForm({ ...form, extension_number: e.target.value })}
+                           placeholder="1001" type="number" data-testid="uf-ext-number" />
                   </div>
                   <div>
-                    {!form.provision_extension && (
-                      <>
-                        <Label className="text-[11px]">Ramal *</Label>
-                        <Input value={form.extension_number}
-                               onChange={(e) => setForm({ ...form, extension_number: e.target.value })}
-                               placeholder="1001" type="number" />
-                      </>
-                    )}
+                    <Label className="text-[11px]">Senha SIP <span className="text-muted-foreground">(auto)</span></Label>
+                    <Input value={form.extension_sip_password}
+                           onChange={(e) => setForm({ ...form, extension_sip_password: e.target.value })}
+                           type="password" placeholder="gerada automaticamente" />
                   </div>
                 </div>
-                {queues.length > 0 && (
-                  <div>
-                    <Label className="text-[11px]">Vincular a filas <span className="text-muted-foreground">({form.queue_uuids.length})</span></Label>
-                    <div className="border border-border rounded p-2 max-h-32 overflow-y-auto bg-white">
-                      {queues.map((q) => (
-                        <label key={q.id} className="flex items-center gap-2 text-xs hover:bg-zinc-50 px-2 py-1 rounded cursor-pointer">
-                          <input type="checkbox"
-                                 checked={form.queue_uuids.includes(q.external_id)}
-                                 onChange={(e) => {
-                                   const next = e.target.checked
-                                     ? [...form.queue_uuids, q.external_id]
-                                     : form.queue_uuids.filter(x => x !== q.external_id);
-                                   setForm({ ...form, queue_uuids: next });
-                                 }}
-                                 disabled={!q.external_id} />
-                          <span className="font-medium">{q.name}</span>
-                          <span className="text-muted-foreground font-mono">ext {q.extension}</span>
-                        </label>
-                      ))}
+              )}
+
+              <label className="flex items-center gap-2 text-sm">
+                <Switch checked={form.provision_call_center_agent}
+                        onCheckedChange={(v) => setForm({ ...form, provision_call_center_agent: v })}
+                        data-testid="uf-prov-cca" />
+                Cadastrar como agente do Call Center (com número/login real)
+              </label>
+              {form.provision_call_center_agent && (
+                <div className="ml-7 space-y-2">
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <Label className="text-[11px]">Número/Login do agente <span className="text-muted-foreground">(default = ramal)</span></Label>
+                      <Input value={form.cc_agent_id}
+                             onChange={(e) => setForm({ ...form, cc_agent_id: e.target.value })}
+                             placeholder="ex: 1001 ou joao_silva" data-testid="uf-cc-agent-id" />
+                    </div>
+                    <div>
+                      {!form.provision_extension && (
+                        <>
+                          <Label className="text-[11px]">Ramal *</Label>
+                          <Input value={form.extension_number}
+                                 onChange={(e) => setForm({ ...form, extension_number: e.target.value })}
+                                 placeholder="1001" type="number" />
+                        </>
+                      )}
                     </div>
                   </div>
-                )}
-              </div>
-            )}
+                  {queues.length > 0 && (
+                    <div>
+                      <Label className="text-[11px]">Vincular a filas <span className="text-muted-foreground">({form.queue_uuids.length})</span></Label>
+                      <div className="border border-border rounded p-2 max-h-32 overflow-y-auto bg-white">
+                        {queues.map((q) => (
+                          <label key={q.id} className="flex items-center gap-2 text-xs hover:bg-zinc-50 px-2 py-1 rounded cursor-pointer">
+                            <input type="checkbox"
+                                   checked={form.queue_uuids.includes(q.external_id)}
+                                   onChange={(e) => {
+                                     const next = e.target.checked
+                                       ? [...form.queue_uuids, q.external_id]
+                                       : form.queue_uuids.filter(x => x !== q.external_id);
+                                     setForm({ ...form, queue_uuids: next });
+                                   }}
+                                   disabled={!q.external_id} />
+                            <span className="font-medium">{q.name}</span>
+                            <span className="text-muted-foreground font-mono">ext {q.extension}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
 
-            <label className="flex items-center gap-2 text-sm">
-              <Switch checked={form.provision_pbx_user}
-                      onCheckedChange={(v) => setForm({ ...form, provision_pbx_user: v })}
-                      data-testid="uf-prov-pbx-user" />
-              Criar login web no FusionPBX
-            </label>
-            {form.provision_pbx_user && (
-              <div className="ml-7">
-                <Label className="text-[11px]">Senha PBX web <span className="text-muted-foreground">(auto)</span></Label>
-                <Input value={form.pbx_password}
-                       onChange={(e) => setForm({ ...form, pbx_password: e.target.value })}
-                       type="password" placeholder="gerada automaticamente" />
-              </div>
-            )}
-          </div>
+              <label className="flex items-center gap-2 text-sm">
+                <Switch checked={form.provision_pbx_user}
+                        onCheckedChange={(v) => setForm({ ...form, provision_pbx_user: v })}
+                        data-testid="uf-prov-pbx-user" />
+                Criar login web no FusionPBX
+              </label>
+              {form.provision_pbx_user && (
+                <div className="ml-7">
+                  <Label className="text-[11px]">Senha PBX web <span className="text-muted-foreground">(auto)</span></Label>
+                  <Input value={form.pbx_password}
+                         onChange={(e) => setForm({ ...form, pbx_password: e.target.value })}
+                         type="password" placeholder="gerada automaticamente" />
+                </div>
+              )}
+            </div>
+          </details>
         )}
 
         <div className="flex items-center justify-between border-t border-border pt-4 mt-2">
@@ -584,6 +594,92 @@ function CredRow({ label, value, onCopy, secret }) {
       <button onClick={() => onCopy(value)} className="p-1.5 hover:bg-zinc-100 rounded" title="Copiar" type="button">
         <Copy size={14} />
       </button>
+    </div>
+  );
+}
+
+function AgentLinkPicker({ agents, value, onChange }) {
+  const [search, setSearch] = useState("");
+  const [showDemo, setShowDemo] = useState(false);
+  const synced = agents.filter(a => a.external_id);
+  const demo = agents.filter(a => !a.external_id);
+  const list = (showDemo ? agents : synced).filter(a => {
+    if (!search) return true;
+    const s = search.toLowerCase();
+    return (a.name || "").toLowerCase().includes(s)
+        || (a.extension || "").includes(s)
+        || (a.username || "").toLowerCase().includes(s);
+  });
+  const selected = agents.find(a => a.id === value);
+
+  return (
+    <div className="space-y-2">
+      {selected && (
+        <div className="flex items-center gap-2 text-xs bg-emerald-100 border border-emerald-300 rounded px-2 py-1.5">
+          <span className="font-medium text-emerald-900">Vinculado:</span>
+          <span className="font-mono">{selected.extension}</span>
+          <span>·</span>
+          <span>{selected.name}</span>
+          {selected.username && <span className="text-muted-foreground">@{selected.username}</span>}
+          {selected.external_id ? (
+            <span className="ml-auto text-[10px] uppercase tracking-widest text-emerald-700">FusionPBX ✓</span>
+          ) : (
+            <span className="ml-auto text-[10px] uppercase tracking-widest text-amber-700">demo</span>
+          )}
+          <button type="button" onClick={() => onChange(null)} className="text-red-600 hover:text-red-800" title="Desvincular">
+            <X size={12} />
+          </button>
+        </div>
+      )}
+
+      <div className="relative">
+        <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
+        <Input value={search} onChange={(e) => setSearch(e.target.value)}
+               placeholder="Filtrar por nome, ramal ou login…"
+               className="pl-8 h-8 text-xs" data-testid="uf-agent-search" />
+      </div>
+
+      <div className="border border-border rounded bg-white max-h-48 overflow-y-auto" data-testid="uf-agent-list">
+        {list.length === 0 ? (
+          <div className="text-xs text-muted-foreground p-3 text-center">
+            {synced.length === 0
+              ? "Nenhum agente sincronizado do FusionPBX. Vá em Central PBX → Sincronizar Agora."
+              : "Nenhum agente encontrado."}
+          </div>
+        ) : list.map((a) => {
+          const active = a.id === value;
+          return (
+            <button type="button" key={a.id}
+              onClick={() => onChange(active ? null : a.id)}
+              className={`w-full text-left px-3 py-2 border-b border-border last:border-0 hover:bg-zinc-50 transition flex items-center gap-2 ${active ? "bg-emerald-50" : ""}`}
+              data-testid={`uf-agent-opt-${a.id}`}>
+              <div className="font-mono text-sm w-12 shrink-0 text-foreground">{a.extension || "—"}</div>
+              <div className="flex-1 min-w-0">
+                <div className="text-sm truncate">{a.name}</div>
+                {a.username && <div className="text-[10px] text-muted-foreground font-mono">@{a.username}</div>}
+              </div>
+              {a.external_id ? (
+                <span className="text-[10px] uppercase tracking-widest text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded">PBX</span>
+              ) : (
+                <span className="text-[10px] uppercase tracking-widest text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded">demo</span>
+              )}
+              {active && <span className="text-emerald-600 text-xs">✓</span>}
+            </button>
+          );
+        })}
+      </div>
+
+      {demo.length > 0 && !showDemo && (
+        <button type="button" onClick={() => setShowDemo(true)}
+                className="text-[11px] text-muted-foreground hover:text-foreground underline">
+          Mostrar também {demo.length} agentes simulados (demo)
+        </button>
+      )}
+      {!value && synced.length > 0 && (
+        <div className="text-[11px] text-muted-foreground">
+          Nenhum vínculo selecionado — o usuário não verá gravações até vincular um agente.
+        </div>
+      )}
     </div>
   );
 }
