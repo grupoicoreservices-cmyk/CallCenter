@@ -16,7 +16,6 @@ import { Label } from "../components/ui/label";
 export default function LoginShell({ mode = "agent" }) {
   const { user, login, logout } = useAuth();
   const navigate = useNavigate();
-  const [domain, setDomain] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [branding, setBranding] = useState(null);
@@ -29,45 +28,39 @@ export default function LoginShell({ mode = "agent" }) {
     : mode === "master" ? ["admin", "supervisor"]
     : ["super_admin"];
 
-  // Branding por subdomínio (master/agent), pelo nome do servidor pra preencher domínio
+  // Branding: extrai domínio do email digitado
   useEffect(() => {
     if (isAdmin) { setBranding(null); return; }
-    // tenta preencher domínio com host atual (ex: callvoxycca.voxyra.net.br)
-    if (!domain) {
-      const host = window.location.hostname;
-      if (host && !host.match(/^(localhost|127\.|preview)/)) setDomain(host);
-    }
-    if (!domain) return;
+    const at = email.indexOf("@");
+    const domain = at > 0 ? email.substring(at + 1).trim() : "";
+    if (!domain || !domain.includes(".")) { setBranding(null); return; }
     const t = setTimeout(async () => {
       try {
-        const { data } = await api.get(`/auth/branding?domain=${encodeURIComponent(domain.trim())}`);
+        const { data } = await api.get(`/auth/branding?domain=${encodeURIComponent(domain)}`);
         setBranding(data.found ? data : null);
       } catch { setBranding(null); }
     }, 350);
     return () => clearTimeout(t);
-    // eslint-disable-next-line
-  }, [domain, isAdmin]);
+  }, [email, isAdmin]);
 
   // Se já logado, redireciona pelo papel correto
   if (user && typeof user === "object") {
     if (allowedRoles.includes(user.role)) {
-      // Login válido para esta página → manda pra rota inicial
       const target = user.role === "super_admin" ? "/tenants"
                    : user.role === "agent" ? "/realtime" : "/";
       return <Navigate to={target} replace />;
     }
-    // Usuário logado, mas em página errada → desloga e mostra mensagem
     return <WrongRolePanel currentRole={user.role} mode={mode} onLogout={logout} />;
   }
 
   async function onSubmit(e) {
     e.preventDefault();
     setErr(""); setLoading(true);
-    const r = await login(isAdmin ? "" : domain, email, password);
+    // Backend extrai domínio automaticamente quando vazio
+    const r = await login("", email, password);
     setLoading(false);
     if (!r.ok) { setErr(r.error); return; }
     if (!allowedRoles.includes(r.role)) {
-      // Bloqueia: era pra outra página
       await logout();
       const where = r.role === "super_admin" ? "/admin"
                   : (r.role === "admin" || r.role === "supervisor") ? "/master"
@@ -128,19 +121,17 @@ export default function LoginShell({ mode = "agent" }) {
           </div>
 
           <form onSubmit={onSubmit} className="space-y-4" data-testid={`login-${mode}-form`}>
-            {!isAdmin && (
-              <div className="space-y-1.5">
-                <Label htmlFor="domain">Domínio</Label>
-                <Input id="domain" value={domain} onChange={(e) => setDomain(e.target.value)}
-                       placeholder="empresa.com.br" required
-                       data-testid={`login-${mode}-domain`} autoComplete="organization" />
-              </div>
-            )}
             <div className="space-y-1.5">
               <Label htmlFor="email">Email</Label>
               <Input id="email" type="email" value={email} onChange={(e) => setEmail(e.target.value)}
                 required data-testid={`login-${mode}-email`} autoComplete="email"
                 placeholder={meta.emailPlaceholder} />
+              {!isAdmin && branding && (
+                <div className="text-[11px] text-muted-foreground flex items-center gap-1.5 mt-1">
+                  <span className="w-2 h-2 rounded-full inline-block" style={{ background: branding.accent_color || "#0EA5E9" }} />
+                  {branding.name}
+                </div>
+              )}
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="pw">Senha</Label>

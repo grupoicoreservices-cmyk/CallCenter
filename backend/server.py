@@ -232,8 +232,17 @@ def _set_auth_cookie(response: Response, token: str):
 
 @api.post("/auth/login")
 async def login(body: LoginReq, response: Response):
-    email = body.email.lower()
+    email = body.email.lower().strip()
     domain = (body.domain or "").strip().lower()
+
+    # Auto-extract domain from email if not provided (ex: "user@empresa.com.br")
+    if not domain and "@" in email:
+        domain_from_email = email.split("@", 1)[1]
+        if domain_from_email:
+            tenant_check = await db.tenants.find_one({"domain": domain_from_email})
+            if tenant_check:
+                domain = domain_from_email
+
     if domain:
         tenant = await db.tenants.find_one({"domain": domain})
         if not tenant:
