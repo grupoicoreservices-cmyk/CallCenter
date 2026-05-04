@@ -15,7 +15,7 @@ import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from "../components/ui/alert-dialog";
-import { Plus, Pencil, Trash2, ShieldCheck, X, Search, RotateCcw } from "lucide-react";
+import { Plus, Pencil, Trash2, ShieldCheck, X, Search, RotateCcw, Copy } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "../contexts/AuthContext";
 
@@ -31,6 +31,7 @@ export default function Users() {
   const [users, setUsers] = useState([]);
   const [permsMeta, setPermsMeta] = useState({ permissions: [], defaults: {}, roles: [] });
   const [agentEntities, setAgentEntities] = useState([]);
+  const [queues, setQueues] = useState([]);
   const [search, setSearch] = useState("");
   const [editing, setEditing] = useState(null); // null | "new" | userObj
   const [confirmDel, setConfirmDel] = useState(null);
@@ -39,14 +40,16 @@ export default function Users() {
   async function load() {
     setLoading(true);
     try {
-      const [u, p, a] = await Promise.all([
+      const [u, p, a, q] = await Promise.all([
         api.get("/users"),
         api.get("/permissions"),
         api.get("/agents").catch(() => ({ data: { agents: [] } })),
+        api.get("/queues").catch(() => ({ data: { queues: [] } })),
       ]);
       setUsers(u.data.users);
       setPermsMeta(p.data);
       setAgentEntities(a.data.agents || []);
+      setQueues(q.data.queues || []);
     } catch (e) {
       toast.error("Falha ao carregar usuários");
     } finally {
@@ -168,6 +171,7 @@ export default function Users() {
         editing={editing}
         permsMeta={permsMeta}
         agentEntities={agentEntities}
+        queues={queues}
         onClose={() => setEditing(null)}
         onSaved={() => { setEditing(null); load(); }}
       />
@@ -190,22 +194,35 @@ export default function Users() {
   );
 }
 
-function UserFormDialog({ open, editing, permsMeta, agentEntities, onClose, onSaved }) {
+function UserFormDialog({ open, editing, permsMeta, agentEntities, queues, onClose, onSaved }) {
   const isNew = editing === "new";
   const initial = useMemo(() => {
-    if (isNew || !editing) return { name: "", email: "", password: "", role: "agent", permissions: null, active: true, agent_id: null };
+    if (isNew || !editing) return {
+      name: "", email: "", password: "", role: "agent",
+      permissions: null, active: true, agent_id: null,
+      // Provisioning fields
+      provision_extension: false, extension_number: "", extension_sip_password: "",
+      provision_pbx_user: false, pbx_password: "",
+      provision_call_center_agent: false, cc_agent_id: "",
+      queue_uuids: [],
+    };
     return {
       name: editing.name || "", email: editing.email || "", password: "",
       role: editing.role || "agent",
       permissions: editing.is_custom_permissions ? [...editing.permissions] : null,
       active: editing.active !== false,
       agent_id: editing.agent_id || null,
+      provision_extension: false, extension_number: "", extension_sip_password: "",
+      provision_pbx_user: false, pbx_password: "",
+      provision_call_center_agent: false, cc_agent_id: "",
+      queue_uuids: [],
     };
   }, [editing, isNew]);
   const [form, setForm] = useState(initial);
   const [useDefaults, setUseDefaults] = useState(initial.permissions === null);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
+  const [credentials, setCredentials] = useState(null);
 
   useEffect(() => {
     setForm(initial);
@@ -256,14 +273,36 @@ function UserFormDialog({ open, editing, permsMeta, agentEntities, onClose, onSa
         if (!form.email || !form.password) {
           setErr("Email e senha são obrigatórios."); setSaving(false); return;
         }
-        await api.post("/users", { email: form.email, password: form.password, ...payload });
-        toast.success("Usuário criado");
+        // Provisionamento (apenas em criação + role agent)
+        if (form.role === "agent") {
+          payload.provision_extension = !!form.provision_extension;
+          payload.provision_pbx_user = !!form.provision_pbx_user;
+          payload.provision_call_center_agent = !!form.provision_call_center_agent;
+          if (form.provision_extension || form.provision_call_center_agent) {
+            if (!form.extension_number) {
+              setErr("Número do ramal é obrigatório quando provisionando."); setSaving(false); return;
+            }
+            payload.extension_number = String(form.extension_number);
+          }
+          if (form.extension_sip_password) payload.extension_sip_password = form.extension_sip_password;
+          if (form.pbx_password) payload.pbx_password = form.pbx_password;
+          if (form.cc_agent_id) payload.cc_agent_id = form.cc_agent_id;
+          if (form.queue_uuids?.length) payload.queue_uuids = form.queue_uuids;
+        }
+        const { data } = await api.post("/users", { email: form.email, password: form.password, ...payload });
+        if (data.provisioned) {
+          setCredentials(data.provisioned);
+          toast.success("Usuário criado e provisionado no FusionPBX");
+        } else {
+          toast.success("Usuário criado");
+          onSaved();
+        }
       } else {
         if (form.password) payload.password = form.password;
         await api.patch(`/users/${editing.id}`, payload);
         toast.success("Usuário atualizado");
+        onSaved();
       }
-      onSaved();
     } catch (e) {
       setErr(formatApiError(e.response?.data?.detail) || "Erro ao salvar");
     } finally {
@@ -271,13 +310,55 @@ function UserFormDialog({ open, editing, permsMeta, agentEntities, onClose, onSa
     }
   }
 
+  function copyText(t) {
+    navigator.clipboard.writeText(t);
+    toast.success("Copiado!");
+  }
+
   return (
-    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+    <Dialog open={open} onOpenChange={(o) => { if (!o) { setCredentials(null); onClose(); } }}>
       <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto" data-testid="user-form">
+        {credentials ? (
+          <div className="space-y-3">
+            <DialogHeader>
+              <DialogTitle>✅ Usuário criado com provisionamento</DialogTitle>
+              <DialogDescription>
+                <strong className="text-amber-700">Anote ou copie agora — as senhas só aparecem uma vez.</strong>
+              </DialogDescription>
+            </DialogHeader>
+            {credentials.extension && (
+              <>
+                <CredRow label="Ramal SIP" value={credentials.extension.extension} onCopy={copyText} />
+                <CredRow label="Senha SIP (config no softphone)" value={credentials.extension.sip_password} onCopy={copyText} secret />
+              </>
+            )}
+            {credentials.pbx_user && (
+              <>
+                <CredRow label="Login PBX (web)" value={credentials.pbx_user.username} onCopy={copyText} />
+                <CredRow label="Senha PBX (web)" value={credentials.pbx_user.password} onCopy={copyText} secret />
+              </>
+            )}
+            {credentials.call_center_agent && (
+              <>
+                <CredRow label="Agente Call Center · Nome" value={credentials.call_center_agent.agent_name} onCopy={copyText} />
+                <CredRow label="Agente Call Center · Login" value={credentials.call_center_agent.agent_id} onCopy={copyText} />
+              </>
+            )}
+            {credentials.pbx_user_error && (
+              <div className="text-xs text-red-700 bg-red-50 border border-red-200 p-2 rounded">
+                ⚠️ Falha ao criar usuário web no PBX: {credentials.pbx_user_error}
+              </div>
+            )}
+            <DialogFooter>
+              <Button onClick={() => { setCredentials(null); onSaved(); }}>Fechar</Button>
+            </DialogFooter>
+          </div>
+        ) : (
+        <>
         <DialogHeader>
           <DialogTitle>{isNew ? "Novo Usuário" : `Editar ${editing?.name || ""}`}</DialogTitle>
           <DialogDescription>
-            {isNew ? "Defina credenciais, papel e permissões." : "Altere papel, permissões ou redefina a senha."}
+            {isNew ? "Defina credenciais, papel e (opcional) provisione no FusionPBX." : "Altere papel, permissões ou redefina a senha."}
           </DialogDescription>
         </DialogHeader>
 
@@ -318,6 +399,103 @@ function UserFormDialog({ open, editing, permsMeta, agentEntities, onClose, onSa
                 {agentEntities.map((a) => <SelectItem key={a.id} value={a.id}>{a.name} · ext. {a.extension}</SelectItem>)}
               </SelectContent>
             </Select>
+          </div>
+        )}
+
+        {isNew && form.role === "agent" && (
+          <div className="border border-dashed border-emerald-300 bg-emerald-50/40 rounded-sm p-4 mt-3 space-y-3">
+            <div className="text-xs font-medium text-emerald-900">
+              Provisionamento no FusionPBX <span className="text-muted-foreground font-normal">(opcional)</span>
+            </div>
+
+            <label className="flex items-center gap-2 text-sm">
+              <Switch checked={form.provision_extension}
+                      onCheckedChange={(v) => setForm({ ...form, provision_extension: v })}
+                      data-testid="uf-prov-ext" />
+              Cadastrar ramal SIP no FusionPBX
+            </label>
+            {form.provision_extension && (
+              <div className="grid grid-cols-2 gap-2 ml-7">
+                <div>
+                  <Label className="text-[11px]">Número do ramal *</Label>
+                  <Input value={form.extension_number}
+                         onChange={(e) => setForm({ ...form, extension_number: e.target.value })}
+                         placeholder="1001" type="number" data-testid="uf-ext-number" />
+                </div>
+                <div>
+                  <Label className="text-[11px]">Senha SIP <span className="text-muted-foreground">(auto)</span></Label>
+                  <Input value={form.extension_sip_password}
+                         onChange={(e) => setForm({ ...form, extension_sip_password: e.target.value })}
+                         type="password" placeholder="gerada automaticamente" />
+                </div>
+              </div>
+            )}
+
+            <label className="flex items-center gap-2 text-sm">
+              <Switch checked={form.provision_call_center_agent}
+                      onCheckedChange={(v) => setForm({ ...form, provision_call_center_agent: v })}
+                      data-testid="uf-prov-cca" />
+              Cadastrar como agente do Call Center (com número/login real)
+            </label>
+            {form.provision_call_center_agent && (
+              <div className="ml-7 space-y-2">
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <Label className="text-[11px]">Número/Login do agente <span className="text-muted-foreground">(default = ramal)</span></Label>
+                    <Input value={form.cc_agent_id}
+                           onChange={(e) => setForm({ ...form, cc_agent_id: e.target.value })}
+                           placeholder="ex: 1001 ou joao_silva" data-testid="uf-cc-agent-id" />
+                  </div>
+                  <div>
+                    {!form.provision_extension && (
+                      <>
+                        <Label className="text-[11px]">Ramal *</Label>
+                        <Input value={form.extension_number}
+                               onChange={(e) => setForm({ ...form, extension_number: e.target.value })}
+                               placeholder="1001" type="number" />
+                      </>
+                    )}
+                  </div>
+                </div>
+                {queues.length > 0 && (
+                  <div>
+                    <Label className="text-[11px]">Vincular a filas <span className="text-muted-foreground">({form.queue_uuids.length})</span></Label>
+                    <div className="border border-border rounded p-2 max-h-32 overflow-y-auto bg-white">
+                      {queues.map((q) => (
+                        <label key={q.id} className="flex items-center gap-2 text-xs hover:bg-zinc-50 px-2 py-1 rounded cursor-pointer">
+                          <input type="checkbox"
+                                 checked={form.queue_uuids.includes(q.external_id)}
+                                 onChange={(e) => {
+                                   const next = e.target.checked
+                                     ? [...form.queue_uuids, q.external_id]
+                                     : form.queue_uuids.filter(x => x !== q.external_id);
+                                   setForm({ ...form, queue_uuids: next });
+                                 }}
+                                 disabled={!q.external_id} />
+                          <span className="font-medium">{q.name}</span>
+                          <span className="text-muted-foreground font-mono">ext {q.extension}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            <label className="flex items-center gap-2 text-sm">
+              <Switch checked={form.provision_pbx_user}
+                      onCheckedChange={(v) => setForm({ ...form, provision_pbx_user: v })}
+                      data-testid="uf-prov-pbx-user" />
+              Criar login web no FusionPBX
+            </label>
+            {form.provision_pbx_user && (
+              <div className="ml-7">
+                <Label className="text-[11px]">Senha PBX web <span className="text-muted-foreground">(auto)</span></Label>
+                <Input value={form.pbx_password}
+                       onChange={(e) => setForm({ ...form, pbx_password: e.target.value })}
+                       type="password" placeholder="gerada automaticamente" />
+              </div>
+            )}
           </div>
         )}
 
@@ -382,7 +560,30 @@ function UserFormDialog({ open, editing, permsMeta, agentEntities, onClose, onSa
             {saving ? "Salvando…" : (isNew ? "Criar Usuário" : "Salvar Alterações")}
           </Button>
         </DialogFooter>
+        </>
+        )}
       </DialogContent>
     </Dialog>
+  );
+}
+
+function CredRow({ label, value, onCopy, secret }) {
+  const [show, setShow] = useState(!secret);
+  if (!value) return null;
+  return (
+    <div className="border border-border rounded p-2 flex items-center gap-2">
+      <div className="flex-1 min-w-0">
+        <div className="text-[10px] uppercase tracking-widest text-muted-foreground font-medium">{label}</div>
+        <div className="font-mono text-sm truncate">{show ? value : "••••••••••"}</div>
+      </div>
+      {secret && (
+        <button onClick={() => setShow(!show)} className="text-xs text-muted-foreground underline" type="button">
+          {show ? "ocultar" : "ver"}
+        </button>
+      )}
+      <button onClick={() => onCopy(value)} className="p-1.5 hover:bg-zinc-100 rounded" title="Copiar" type="button">
+        <Copy size={14} />
+      </button>
+    </div>
   );
 }

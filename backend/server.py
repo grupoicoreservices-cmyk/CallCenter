@@ -561,6 +561,15 @@ class UserCreate(BaseModel):
     permissions: Optional[List[str]] = None
     active: bool = True
     agent_id: Optional[str] = None
+    # Provisionamento opcional no FusionPBX
+    provision_extension: bool = False     # cria ramal SIP
+    extension_number: Optional[str] = None  # ex: "1001"
+    extension_sip_password: Optional[str] = None  # vazio = gerada
+    provision_pbx_user: bool = False      # cria login web no FusionPBX
+    pbx_password: Optional[str] = None
+    provision_call_center_agent: bool = False  # cria call_center_agent
+    cc_agent_id: Optional[str] = None     # login do agente (default = extension)
+    queue_uuids: List[str] = []           # filas para vincular agente
     @validator("email")
     def _e(cls, v): return validate_email_str(v)
 
@@ -603,19 +612,104 @@ async def create_user(body: UserCreate, user: dict = Depends(require_permission(
     if body.permissions is not None:
         invalid = [p for p in body.permissions if p not in {x["key"] for x in ALL_PERMISSIONS}]
         if invalid: raise HTTPException(status_code=400, detail=f"Permissões inválidas: {invalid}")
+
+    # Provisionamento FusionPBX (opcional)
+    provisioned: Dict[str, Any] = {}
+    fpbx_client = None
+    fpbx_settings = None
+    needs_fpbx = body.provision_extension or body.provision_pbx_user or body.provision_call_center_agent
+    if needs_fpbx:
+        try:
+            fpbx_client, fpbx_settings = await _get_db_client(tid)
+        except HTTPException as e:
+            raise HTTPException(status_code=400, detail=f"Provisionamento FPBX requer modo PostgreSQL: {e.detail}")
+        if not body.extension_number and (body.provision_extension or body.provision_call_center_agent):
+            raise HTTPException(status_code=400, detail="Número do ramal é obrigatório para provisionamento")
+
+    sip_password = body.extension_sip_password or _gen_pwd(12)
+    pbx_password = body.pbx_password or _gen_pwd(10)
+    cc_agent_id = body.cc_agent_id or str(body.extension_number or "")
+    voxyra_agent_id_for_link = body.agent_id
+
+    try:
+        if body.provision_extension:
+            ext_res = await fpbx_client.provision_extension(
+                extension=str(body.extension_number), sip_password=sip_password,
+                caller_id_name=body.name, caller_id_number=str(body.extension_number),
+                description=f"Voxyra · {body.name}",
+            )
+            provisioned["extension"] = {**ext_res, "sip_password": sip_password}
+
+        if body.provision_pbx_user:
+            try:
+                user_res = await fpbx_client.provision_user(
+                    username=cc_agent_id or email.split("@")[0],
+                    password_hash=pbx_password,
+                )
+                provisioned["pbx_user"] = {**user_res, "password": pbx_password}
+                if "extension" in provisioned:
+                    await fpbx_client.link_extension_to_user(
+                        provisioned["extension"]["extension_uuid"],
+                        user_res["user_uuid"],
+                    )
+            except FusionPBXDBError as e:
+                logger.warning("Falha pbx_user: %s", e)
+                provisioned["pbx_user_error"] = str(e)
+
+        if body.provision_call_center_agent:
+            ag_res = await fpbx_client.provision_call_center_agent(
+                agent_name=body.name, agent_id=cc_agent_id,
+                extension=str(body.extension_number),
+                domain_name=fpbx_settings.get("domain_name") or "",
+            )
+            provisioned["call_center_agent"] = ag_res
+            for qid in body.queue_uuids or []:
+                try:
+                    await fpbx_client.assign_agent_to_queue(
+                        ag_res["call_center_agent_uuid"], qid,
+                    )
+                except Exception as e:
+                    logger.warning("Falha vincular fila %s: %s", qid, e)
+            # cria entidade agent local linkada
+            voxyra_agent_uuid = str(uuid.uuid4())
+            await db.agents.insert_one({
+                "id": voxyra_agent_uuid, "tenant_id": tid,
+                "external_id": ag_res["call_center_agent_uuid"],
+                "name": body.name, "username": cc_agent_id,
+                "extension": str(body.extension_number or ""),
+                "email": email, "source": "call_center_agent",
+                "avatar": AGENT_AVATARS[hash(cc_agent_id) % len(AGENT_AVATARS)],
+                "status": "offline", "queues": [], "calls_handled": 0,
+                "avg_handle_sec": 0, "csat": 0, "adherence_pct": 0,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            })
+            provisioned["voxyra_agent_id"] = voxyra_agent_uuid
+            voxyra_agent_id_for_link = voxyra_agent_uuid
+
+    except HTTPException:
+        raise
+    except FusionPBXDBError as e:
+        raise HTTPException(status_code=502, detail=f"Falha no FusionPBX: {e}")
+
     uid = str(uuid.uuid4())
     doc = {
         "id": uid, "tenant_id": tid, "email": email, "name": body.name, "role": body.role,
         "password_hash": hash_password(body.password),
-        "permissions": body.permissions, "active": body.active, "agent_id": body.agent_id,
+        "permissions": body.permissions, "active": body.active,
+        "agent_id": voxyra_agent_id_for_link,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     await db.users.insert_one(doc)
     await write_audit(user, "create", "user", uid, f"{body.name} <{email}>", {
         "role": body.role, "tenant_id": tid,
         "permissions_mode": "custom" if body.permissions is not None else "default",
+        "provisioned": list(provisioned.keys()),
     })
-    return _serialize_user(doc)
+    out = _serialize_user(doc)
+    if provisioned:
+        out["provisioned"] = provisioned
+    return out
 
 @api.patch("/users/{user_id}")
 async def update_user(user_id: str, body: UserUpdate, user: dict = Depends(require_permission("users.manage"))):
