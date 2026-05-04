@@ -69,19 +69,38 @@ class FreeSwitchESL:
         except (asyncio.TimeoutError, OSError) as e:
             raise FreeSwitchESLError(f"Conexão TCP falhou em {self.host}:{self.port} → "
                                      f"[{type(e).__name__}] {e}") from e
-        # Read auth/request
+        # Read auth/request — se ACL bloquear, o FS fecha sem mandar nada
         try:
-            await self._read_headers(reader)
+            initial = await self._read_headers(reader)
         except asyncio.TimeoutError as e:
             writer.close()
-            raise FreeSwitchESLError(f"Timeout aguardando auth/request de {self.host}:{self.port}") from e
+            raise FreeSwitchESLError(f"Timeout aguardando auth/request de {self.host}:{self.port}. "
+                                     f"Provavelmente ACL bloqueando — verifique apply-inbound-acl no event_socket.conf.xml.") from e
+        if not initial:
+            try: writer.close()
+            except Exception: pass
+            raise FreeSwitchESLError(
+                f"FreeSWITCH em {self.host}:{self.port} aceitou TCP mas fechou a conexão sem responder. "
+                f"Causa típica: ACL bloqueando o IP do Voxyra. "
+                f"Solução: crie uma ACL liberando seu IP em /etc/freeswitch/autoload_configs/acl.conf.xml e "
+                f"aplique em event_socket.conf.xml (apply-inbound-acl=\"voxyra\"). Depois: fs_cli -x \"reloadxml\" && "
+                f"fs_cli -x \"reload mod_event_socket\"."
+            )
         # Send auth
-        resp = await self._send_command(writer, reader, f"auth {self.password}")
+        try:
+            resp = await self._send_command(writer, reader, f"auth {self.password}")
+        except asyncio.TimeoutError as e:
+            try: writer.close()
+            except Exception: pass
+            raise FreeSwitchESLError(
+                f"Sem resposta após enviar 'auth' — provavelmente senha ESL incorreta ou ACL bloqueou após accept. "
+                f"Verifique o param 'password' em event_socket.conf.xml."
+            ) from e
         reply = resp["headers"].get("reply-text", "")
         if not reply.startswith("+OK"):
             try: writer.close()
             except Exception: pass
-            raise FreeSwitchESLError(f"Auth ESL falhou: {reply or 'sem resposta'}")
+            raise FreeSwitchESLError(f"Auth ESL falhou: {reply or 'servidor não enviou Reply-Text. Senha incorreta ou ACL bloqueando.'}")
         return reader, writer
 
     async def show_channels(self) -> List[Dict[str, Any]]:
