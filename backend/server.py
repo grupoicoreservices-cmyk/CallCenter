@@ -1918,6 +1918,256 @@ async def fusion_resync_agents(user: dict = Depends(get_current_user), tenant_id
     return {"ok": True, "deleted": deleted_agents, "summary": summary}
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# PROVISIONING — cria entidades no FusionPBX a partir do Voxyra
+# ──────────────────────────────────────────────────────────────────────────
+
+class ProvisionQueueReq(BaseModel):
+    name: str
+    extension: str
+    strategy: str = "ring-all"
+    max_wait_time: int = 120
+
+
+class ProvisionAgentReq(BaseModel):
+    name: str
+    extension: str
+    agent_id: Optional[str] = None
+    sip_password: Optional[str] = None
+    pbx_password: Optional[str] = None
+    voxyra_email: Optional[str] = None
+    voxyra_password: Optional[str] = None
+    queue_uuids: List[str] = []
+    create_pbx_user: bool = True
+    create_voxyra_user: bool = True
+
+
+def _gen_pwd(n: int = 10) -> str:
+    import secrets, string
+    alphabet = string.ascii_letters + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(n))
+
+
+async def _get_db_client(tid: str):
+    """Returns (FusionPBXDBClient, settings). Only PostgreSQL mode supports provisioning."""
+    s = await db.fusionpbx_settings.find_one({"tenant_id": tid})
+    if not s:
+        raise HTTPException(status_code=400, detail="FusionPBX não configurado")
+    if (s.get("connection_type") or "rest") != "db":
+        raise HTTPException(status_code=400,
+            detail="Provisionamento requer modo PostgreSQL Direto. Mude em Central PBX → Configuração.")
+    if not s.get("db_host") or not s.get("db_username") or not s.get("domain_uuid"):
+        raise HTTPException(status_code=400,
+            detail="Configuração incompleta: host, usuário e domain_uuid são obrigatórios.")
+    return FusionPBXDBClient(
+        host=s["db_host"], port=int(s.get("db_port") or 5432),
+        database=s.get("db_name") or "fusionpbx",
+        username=s["db_username"], password=s.get("db_password") or "",
+        domain_uuid=s["domain_uuid"], ssl=bool(s.get("db_ssl")),
+    ), s
+
+
+@api.post("/fusionpbx/provision/queue")
+async def provision_queue(body: ProvisionQueueReq,
+                          user: dict = Depends(get_current_user),
+                          tenant_id: Optional[str] = None):
+    tid = await _resolve_tenant_for_fusion(user, tenant_id)
+    if user.get("role") not in ("super_admin", "admin"):
+        raise HTTPException(status_code=403, detail="Sem permissão")
+    client, _ = await _get_db_client(tid)
+    try:
+        result = await client.provision_queue(
+            name=body.name, extension=str(body.extension),
+            strategy=body.strategy, max_wait_time=body.max_wait_time,
+        )
+    except FusionPBXDBError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    doc = {
+        "id": str(uuid.uuid4()), "tenant_id": tid,
+        "external_id": result["call_center_queue_uuid"],
+        "name": body.name, "extension": str(body.extension),
+        "strategy": body.strategy, "max_wait": body.max_wait_time,
+        "waiting": 0, "answered_today": 0, "missed_today": 0, "avg_wait_sec": 0,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.queues.insert_one(doc)
+    await write_audit(user, "create", "queue", result["call_center_queue_uuid"],
+                      f"{body.name} (ext {body.extension})", body.dict())
+    return {"ok": True, **result, "voxyra_queue_id": doc["id"]}
+
+
+@api.post("/fusionpbx/provision/agent")
+async def provision_agent(body: ProvisionAgentReq,
+                          user: dict = Depends(get_current_user),
+                          tenant_id: Optional[str] = None):
+    tid = await _resolve_tenant_for_fusion(user, tenant_id)
+    if user.get("role") not in ("super_admin", "admin"):
+        raise HTTPException(status_code=403, detail="Sem permissão")
+    client, settings = await _get_db_client(tid)
+    domain_name = settings.get("domain_name") or ""
+    agent_id = body.agent_id or str(body.extension)
+    sip_password = body.sip_password or _gen_pwd(12)
+    pbx_password = body.pbx_password or _gen_pwd(10)
+
+    created: Dict[str, Any] = {"sip_password": sip_password}
+
+    try:
+        ext_res = await client.provision_extension(
+            extension=str(body.extension), sip_password=sip_password,
+            caller_id_name=body.name, caller_id_number=str(body.extension),
+            description=f"Voxyra · {body.name}",
+        )
+        created["extension"] = ext_res
+    except FusionPBXDBError as e:
+        raise HTTPException(status_code=502, detail=f"extension: {e}")
+
+    pbx_user_uuid: Optional[str] = None
+    if body.create_pbx_user:
+        try:
+            user_res = await client.provision_user(
+                username=agent_id, password_hash=pbx_password,
+            )
+            pbx_user_uuid = user_res["user_uuid"]
+            created["pbx_user"] = {**user_res, "password": pbx_password}
+            await client.link_extension_to_user(ext_res["extension_uuid"], pbx_user_uuid)
+        except FusionPBXDBError as e:
+            await client.delete_extension(ext_res["extension_uuid"])
+            raise HTTPException(status_code=502, detail=f"pbx_user: {e}")
+
+    try:
+        ag_res = await client.provision_call_center_agent(
+            agent_name=body.name, agent_id=agent_id,
+            extension=str(body.extension), domain_name=domain_name,
+        )
+        created["agent"] = ag_res
+    except FusionPBXDBError as e:
+        await client.delete_extension(ext_res["extension_uuid"])
+        if pbx_user_uuid:
+            try:
+                conn_del = await client._connect()
+                await conn_del.execute(
+                    "DELETE FROM v_users WHERE user_uuid = $1::uuid", pbx_user_uuid,
+                )
+                await conn_del.close()
+            except Exception:
+                pass
+        raise HTTPException(status_code=502, detail=f"call_center_agent: {e}")
+
+    queues_linked = 0
+    for qid in body.queue_uuids or []:
+        try:
+            await client.assign_agent_to_queue(ag_res["call_center_agent_uuid"], qid)
+            queues_linked += 1
+        except Exception as e:
+            logger.warning("Falha ao vincular agente à fila %s: %s", qid, e)
+    created["queues_linked"] = queues_linked
+
+    voxyra_agent_id = str(uuid.uuid4())
+    avatar = AGENT_AVATARS[hash(agent_id) % len(AGENT_AVATARS)]
+    await db.agents.insert_one({
+        "id": voxyra_agent_id, "tenant_id": tid,
+        "external_id": ag_res["call_center_agent_uuid"],
+        "name": body.name, "username": agent_id,
+        "extension": str(body.extension), "email": body.voxyra_email or "",
+        "source": "call_center_agent", "avatar": avatar,
+        "status": "offline", "queues": [], "calls_handled": 0,
+        "avg_handle_sec": 0, "csat": 0, "adherence_pct": 0,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    })
+    created["voxyra_agent_id"] = voxyra_agent_id
+
+    if body.create_voxyra_user:
+        tenant = await db.tenants.find_one({"id": tid}, {"_id": 0})
+        email = (body.voxyra_email or "").lower().strip()
+        if not email and tenant:
+            email = f"{agent_id}@{tenant.get('domain', 'voxyra.local')}"
+        voxyra_password = body.voxyra_password or _gen_pwd(10)
+        existing_u = await db.users.find_one({"tenant_id": tid, "email": email})
+        if existing_u:
+            created["voxyra_user"] = {"email": email, "id": existing_u["id"],
+                                      "warning": "usuário já existia, não foi recriado"}
+        else:
+            voxyra_user_id = str(uuid.uuid4())
+            await db.users.insert_one({
+                "id": voxyra_user_id, "tenant_id": tid, "email": email,
+                "name": body.name, "role": "agent",
+                "password_hash": hash_password(voxyra_password),
+                "permissions": None, "active": True,
+                "agent_id": voxyra_agent_id,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+            created["voxyra_user"] = {"id": voxyra_user_id, "email": email,
+                                      "password": voxyra_password}
+
+    await write_audit(user, "create", "agent", ag_res["call_center_agent_uuid"],
+                      f"{body.name} ({agent_id} · ext {body.extension})",
+                      {"queues_linked": queues_linked,
+                       "create_pbx_user": body.create_pbx_user,
+                       "create_voxyra_user": body.create_voxyra_user})
+    return {"ok": True, **created}
+
+
+@api.delete("/fusionpbx/provision/queue/{queue_id}")
+async def deprovision_queue(queue_id: str,
+                            user: dict = Depends(get_current_user),
+                            tenant_id: Optional[str] = None):
+    tid = await _resolve_tenant_for_fusion(user, tenant_id)
+    if user.get("role") not in ("super_admin", "admin"):
+        raise HTTPException(status_code=403, detail="Sem permissão")
+    q = await db.queues.find_one({"id": queue_id, "tenant_id": tid})
+    if not q:
+        raise HTTPException(status_code=404, detail="Fila não encontrada")
+    if q.get("external_id"):
+        try:
+            client, _ = await _get_db_client(tid)
+            await client.delete_queue(q["external_id"])
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.warning("Falha ao deletar fila no PBX: %s", e)
+    await db.queues.delete_one({"id": queue_id, "tenant_id": tid})
+    await write_audit(user, "delete", "queue", queue_id, q.get("name", ""), {})
+    return {"ok": True}
+
+
+@api.delete("/fusionpbx/provision/agent/{agent_id}")
+async def deprovision_agent(agent_id: str,
+                            user: dict = Depends(get_current_user),
+                            tenant_id: Optional[str] = None):
+    tid = await _resolve_tenant_for_fusion(user, tenant_id)
+    if user.get("role") not in ("super_admin", "admin"):
+        raise HTTPException(status_code=403, detail="Sem permissão")
+    a = await db.agents.find_one({"id": agent_id, "tenant_id": tid})
+    if not a:
+        raise HTTPException(status_code=404, detail="Agente não encontrado")
+    if a.get("external_id"):
+        try:
+            client, _ = await _get_db_client(tid)
+            await client.delete_call_center_agent(a["external_id"])
+            try:
+                conn = await client._connect()
+                await conn.execute(
+                    """DELETE FROM v_extensions
+                       WHERE domain_uuid = $1::uuid AND extension = $2""",
+                    client.domain_uuid, a.get("extension", ""),
+                )
+                await conn.close()
+            except Exception:
+                pass
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.warning("Falha ao deletar agente no PBX: %s", e)
+    await db.agents.delete_one({"id": agent_id, "tenant_id": tid})
+    await db.users.delete_many({"tenant_id": tid, "agent_id": agent_id})
+    await write_audit(user, "delete", "agent", agent_id, a.get("name", ""), {})
+    return {"ok": True}
+
+
+
+
 async def _run_sync_for_tenant(tid: str, cdr_limit: int = 200) -> Dict[str, Any]:
     """Core sync logic reusable by manual endpoint + scheduler."""
     s = await db.fusionpbx_settings.find_one({"tenant_id": tid})
