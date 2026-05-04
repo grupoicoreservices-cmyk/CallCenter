@@ -6,6 +6,7 @@ load_dotenv(ROOT_DIR / '.env')
 import os
 import random
 import logging
+import time
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any
@@ -872,32 +873,64 @@ async def realtime_calls(user: dict = Depends(require_permission("realtime.view"
     # Try to get live calls from FusionPBX if integration is enabled
     if tid:
         s = await db.fusionpbx_settings.find_one({"tenant_id": tid})
-        if s and s.get("enabled") and s.get("base_url"):
+        if s and s.get("enabled"):
+            ctype = s.get("connection_type") or "rest"
+            client = None
+            ClientErr: type = Exception
             try:
-                client = FusionPBXClient(
-                    base_url=s["base_url"], api_key=s.get("api_key"),
-                    username=s.get("username"), password=s.get("password"),
-                    domain_uuid=s.get("domain_uuid"), domain_name=s.get("domain_name"),
-                    verify_ssl=bool(s.get("verify_ssl", True)),
-                )
-                raw = await client.list_active_calls()
-                if raw:
-                    calls = []
-                    for c in raw:
-                        calls.append({
-                            "id": c.get("uuid") or c.get("call_uuid") or str(uuid.uuid4()),
-                            "agent_name": c.get("agent_name") or c.get("cc_agent") or "—",
-                            "agent_extension": str(c.get("destination") or c.get("extension") or "—"),
-                            "agent_avatar": None,
-                            "queue_name": c.get("queue_name") or "—",
-                            "caller_number": c.get("caller_id_number") or c.get("cid_num") or "—",
-                            "direction": c.get("direction") if c.get("direction") in ("inbound", "outbound") else "inbound",
-                            "elapsed_sec": int(c.get("duration", 0) or 0),
-                            "status": "incall" if c.get("answer_state") == "answered" else "ringing",
-                        })
-                    return {"calls": calls, "source": "fusionpbx"}
-            except FusionPBXError:
-                pass  # fallback to DB
+                if ctype == "db" and s.get("db_host"):
+                    client = FusionPBXDBClient(
+                        host=s["db_host"], port=int(s.get("db_port") or 5432),
+                        database=s.get("db_name") or "fusionpbx",
+                        username=s.get("db_username") or "", password=s.get("db_password") or "",
+                        domain_uuid=s.get("domain_uuid"), ssl=bool(s.get("db_ssl")),
+                    )
+                    ClientErr = FusionPBXDBError
+                elif ctype == "rest" and s.get("base_url"):
+                    client = FusionPBXClient(
+                        base_url=s["base_url"], api_key=s.get("api_key"),
+                        username=s.get("username"), password=s.get("password"),
+                        domain_uuid=s.get("domain_uuid"), domain_name=s.get("domain_name"),
+                        verify_ssl=bool(s.get("verify_ssl", True)),
+                    )
+                    ClientErr = FusionPBXError
+                if client:
+                    raw = await client.list_active_calls()
+                    if raw:
+                        # Build extension → agent map for richer info
+                        agents_db = await db.agents.find(f, {"_id": 0}).to_list(500)
+                        ext_to_agent = {a.get("extension"): a for a in agents_db if a.get("extension")}
+                        calls = []
+                        for c in raw:
+                            ext = str(c.get("destination_number") or c.get("destination") or c.get("extension") or "")
+                            ag = ext_to_agent.get(ext) or {}
+                            answer_state = (c.get("answer_state") or c.get("channel_state") or "").lower()
+                            is_answered = "answered" in answer_state or "exchange_media" in answer_state or answer_state == "cs_execute"
+                            # duration: from created_epoch if available
+                            elapsed = 0
+                            try:
+                                if c.get("created_epoch"):
+                                    elapsed = int(time.time() - int(c["created_epoch"]))
+                                elif c.get("duration"):
+                                    elapsed = int(c["duration"])
+                            except Exception:
+                                pass
+                            calls.append({
+                                "id": c.get("uuid") or c.get("call_uuid") or str(uuid.uuid4()),
+                                "agent_name": ag.get("name") or c.get("caller_id_name") or "—",
+                                "agent_extension": ext or "—",
+                                "agent_avatar": ag.get("avatar"),
+                                "queue_name": c.get("queue_name") or "—",
+                                "caller_number": c.get("caller_id_number") or c.get("cid_num") or "—",
+                                "direction": c.get("direction") if c.get("direction") in ("inbound", "outbound") else "inbound",
+                                "elapsed_sec": elapsed,
+                                "status": "incall" if is_answered else "ringing",
+                            })
+                        return {"calls": calls, "source": "fusionpbx"}
+            except ClientErr as e:
+                logger.warning("realtime/calls falhou (%s): %s", ctype, e)
+            except Exception as e:
+                logger.warning("realtime/calls erro inesperado: %s", e)
     # Fallback: just show agents currently in "incall" status (no fake data)
     agents = await db.agents.find({**f, "status": "incall"}, {"_id": 0}).to_list(100)
     queues = {q["id"]: q for q in await db.queues.find(f, {"_id": 0}).to_list(100)}
