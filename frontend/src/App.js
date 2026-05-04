@@ -5,7 +5,9 @@ import { Toaster } from "./components/ui/sonner";
 import { AuthProvider } from "./contexts/AuthContext";
 import ProtectedRoute from "./components/ProtectedRoute";
 
-import Login from "./pages/Login";
+import LoginAgent from "./pages/LoginAgent";
+import LoginMaster from "./pages/LoginMaster";
+import LoginAdmin from "./pages/LoginAdmin";
 import Dashboard from "./pages/Dashboard";
 import Realtime from "./pages/Realtime";
 import Recordings from "./pages/Recordings";
@@ -30,22 +32,24 @@ function App() {
         <BrowserRouter>
           <VersionWatcher />
           <Routes>
-            <Route path="/login" element={<Login />} />
-            <Route path="/" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
+            <Route path="/login" element={<LoginAgent />} />
+            <Route path="/master" element={<LoginMaster />} />
+            <Route path="/admin" element={<LoginAdmin />} />
+            <Route path="/" element={<ProtectedRoute hint="master"><Dashboard /></ProtectedRoute>} />
             <Route path="/realtime" element={<ProtectedRoute><Realtime /></ProtectedRoute>} />
             <Route path="/recordings" element={<ProtectedRoute><Recordings /></ProtectedRoute>} />
-            <Route path="/reports" element={<ProtectedRoute><Reports /></ProtectedRoute>} />
-            <Route path="/queues" element={<ProtectedRoute><Queues /></ProtectedRoute>} />
-            <Route path="/agents" element={<ProtectedRoute><Agents /></ProtectedRoute>} />
-            <Route path="/tv" element={<ProtectedRoute><TvPanel /></ProtectedRoute>} />
-            <Route path="/users" element={<ProtectedRoute><Users /></ProtectedRoute>} />
-            <Route path="/audit" element={<ProtectedRoute><AuditLogs /></ProtectedRoute>} />
-            <Route path="/tenants" element={<ProtectedRoute requireSuperAdmin><Tenants /></ProtectedRoute>} />
-            <Route path="/plans" element={<ProtectedRoute requireSuperAdmin><Plans /></ProtectedRoute>} />
-            <Route path="/billing" element={<ProtectedRoute requireSuperAdmin><BillingSettings /></ProtectedRoute>} />
-            <Route path="/charges" element={<ProtectedRoute requireSuperAdmin><Charges /></ProtectedRoute>} />
-            <Route path="/fusionpbx" element={<ProtectedRoute><FusionPBXSettings /></ProtectedRoute>} />
-            <Route path="/system" element={<ProtectedRoute requireSuperAdmin><SystemUpdate /></ProtectedRoute>} />
+            <Route path="/reports" element={<ProtectedRoute hint="master"><Reports /></ProtectedRoute>} />
+            <Route path="/queues" element={<ProtectedRoute hint="master"><Queues /></ProtectedRoute>} />
+            <Route path="/agents" element={<ProtectedRoute hint="master"><Agents /></ProtectedRoute>} />
+            <Route path="/tv" element={<ProtectedRoute hint="master"><TvPanel /></ProtectedRoute>} />
+            <Route path="/users" element={<ProtectedRoute hint="master"><Users /></ProtectedRoute>} />
+            <Route path="/audit" element={<ProtectedRoute hint="master"><AuditLogs /></ProtectedRoute>} />
+            <Route path="/tenants" element={<ProtectedRoute requireSuperAdmin hint="admin"><Tenants /></ProtectedRoute>} />
+            <Route path="/plans" element={<ProtectedRoute requireSuperAdmin hint="admin"><Plans /></ProtectedRoute>} />
+            <Route path="/billing" element={<ProtectedRoute requireSuperAdmin hint="admin"><BillingSettings /></ProtectedRoute>} />
+            <Route path="/charges" element={<ProtectedRoute requireSuperAdmin hint="admin"><Charges /></ProtectedRoute>} />
+            <Route path="/fusionpbx" element={<ProtectedRoute hint="master"><FusionPBXSettings /></ProtectedRoute>} />
+            <Route path="/system" element={<ProtectedRoute requireSuperAdmin hint="admin"><SystemUpdate /></ProtectedRoute>} />
           </Routes>
           <Toaster richColors position="top-right" />
         </BrowserRouter>

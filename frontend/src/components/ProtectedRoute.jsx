@@ -1,7 +1,11 @@
 import { Navigate } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
 
-export default function ProtectedRoute({ children, requireSuperAdmin = false }) {
+/**
+ * Redireciona para o portal de login correto baseado em hint/contexto.
+ * Default: /login (agente). Hint pode forçar /master ou /admin.
+ */
+export default function ProtectedRoute({ children, requireSuperAdmin = false, hint }) {
   const { user, loading } = useAuth();
   if (loading) {
     return (
@@ -10,7 +14,10 @@ export default function ProtectedRoute({ children, requireSuperAdmin = false }) 
       </div>
     );
   }
-  if (!user) return <Navigate to="/login" replace />;
+  if (!user) {
+    const target = hint === "admin" ? "/admin" : hint === "master" ? "/master" : "/login";
+    return <Navigate to={target} replace />;
+  }
   if (requireSuperAdmin && user.role !== "super_admin") {
     return <Navigate to="/" replace />;
   }
