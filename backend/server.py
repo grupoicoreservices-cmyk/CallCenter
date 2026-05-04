@@ -1983,6 +1983,32 @@ async def fusion_test(user: dict = Depends(get_current_user), tenant_id: Optiona
         raise HTTPException(status_code=502, detail=str(e))
 
 
+@api.post("/fusionpbx/fix-call-dates")
+async def fix_call_dates(user: dict = Depends(get_current_user), tenant_id: Optional[str] = None):
+    """One-shot: normalize legacy started_at/ended_at strings stored in Mongo
+    (e.g. 'YYYY-MM-DD HH:MM:SS' → ISO 'YYYY-MM-DDTHH:MM:SS+00:00').
+    Necessary because Mongo string-compare breaks date filters when format mixes."""
+    tid = await _resolve_tenant_for_fusion(user, tenant_id)
+    if user.get("role") not in ("super_admin", "admin"):
+        raise HTTPException(status_code=403, detail="Sem permissão")
+    fixed = 0
+    cursor = db.calls.find({"tenant_id": tid, "started_at": {"$regex": " "}},
+                           {"_id": 0, "id": 1, "started_at": 1, "ended_at": 1})
+    async for c in cursor:
+        upd = {}
+        for key in ("started_at", "ended_at"):
+            v = c.get(key) or ""
+            if v and " " in v and "T" not in v:
+                iso = v.replace(" ", "T", 1)
+                if "+" not in iso and "Z" not in iso:
+                    iso = iso + "+00:00"
+                upd[key] = iso
+        if upd:
+            await db.calls.update_one({"id": c["id"]}, {"$set": upd})
+            fixed += 1
+    return {"ok": True, "fixed": fixed, "tenant_id": tid}
+
+
 @api.post("/fusionpbx/clear-demo-data")
 async def fusion_clear_demo_data(user: dict = Depends(get_current_user), tenant_id: Optional[str] = None):
     """Deletes all mocked/seeded data (entities without external_id) from the tenant.
@@ -2323,17 +2349,29 @@ async def _run_sync_for_tenant(tid: str, cdr_limit: int = 200) -> Dict[str, Any]
         except ClientErr as e2:
             summary["errors"].append(f"agents: {e} | extensions: {e2}")
     summary["agent_source"] = agent_source
+    # Map FusionPBX agent_status → Voxyra status
+    def _map_status(pbx_status: Optional[str]) -> Optional[str]:
+        if not pbx_status: return None
+        s = str(pbx_status).strip().lower()
+        if "available" in s and "demand" not in s: return "online"
+        if "available (on demand)" in s: return "online"
+        if "break" in s or "pause" in s: return "paused"
+        if "logged out" in s or "logged_out" in s: return "offline"
+        return None
     for ag in agent_records:
         if not ag["external_id"]: continue
         existing = await db.agents.find_one({"tenant_id": tid, "external_id": ag["external_id"]})
+        mapped = _map_status(ag.get("agent_status"))
+        new_status = mapped if mapped else (existing.get("status") if existing else "offline")
         doc = {
             "tenant_id": tid, "external_id": ag["external_id"],
             "name": ag["name"], "username": ag.get("username", ""),
             "extension": ag.get("extension", ""), "email": ag.get("email", ""),
             "source": ag.get("source", "extension"),
             "agent_type": ag.get("agent_type"),
+            "pbx_status": ag.get("agent_status"),
             "avatar": existing.get("avatar") if existing else AGENT_AVATARS[summary["agents_synced"] % len(AGENT_AVATARS)],
-            "status": existing.get("status") if existing else "offline",
+            "status": new_status,
             "queues": existing.get("queues", []) if existing else [],
             "calls_handled": existing.get("calls_handled", 0) if existing else 0,
             "avg_handle_sec": existing.get("avg_handle_sec", 0) if existing else 0,
@@ -2348,6 +2386,22 @@ async def _run_sync_for_tenant(tid: str, cdr_limit: int = 200) -> Dict[str, Any]
             doc["created_at"] = doc["updated_at"]
             await db.agents.insert_one(doc)
         summary["agents_synced"] += 1
+    # Active calls → mark agents as 'incall'
+    try:
+        active = await client.list_active_calls()
+        in_call_extensions = set()
+        for ac in active or []:
+            ext = ac.get("destination_number") or ac.get("caller_id_number")
+            cs = (ac.get("channel_state") or "").lower()
+            if cs in ("cs_execute", "cs_exchange_media", "cs_consume_media") and ext:
+                in_call_extensions.add(str(ext))
+        if in_call_extensions:
+            await db.agents.update_many(
+                {"tenant_id": tid, "extension": {"$in": list(in_call_extensions)}},
+                {"$set": {"status": "incall"}},
+            )
+    except Exception as e:
+        logger.warning("active-calls status sync falhou: %s", e)
     # Queues
     try:
         queues = await client.list_call_center_queues()
@@ -2436,6 +2490,45 @@ async def _run_sync_for_tenant(tid: str, cdr_limit: int = 200) -> Dict[str, Any]
     except ClientErr as e:
         summary["errors"].append(f"cdr: {e}")
     summary["finished_at"] = datetime.now(timezone.utc).isoformat()
+    # Recompute calls_handled & avg_handle_sec per agent (last 24h answered calls)
+    try:
+        cutoff_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        pipeline = [
+            {"$match": {"tenant_id": tid, "disposition": "answered",
+                        "started_at": {"$gte": cutoff_24h},
+                        "agent_id": {"$ne": None}}},
+            {"$group": {"_id": "$agent_id",
+                        "calls_handled": {"$sum": 1},
+                        "avg_handle_sec": {"$avg": "$duration_sec"}}},
+        ]
+        async for row in db.calls.aggregate(pipeline):
+            await db.agents.update_one(
+                {"id": row["_id"], "tenant_id": tid},
+                {"$set": {"calls_handled": int(row["calls_handled"]),
+                          "avg_handle_sec": int(row.get("avg_handle_sec") or 0)}},
+            )
+    except Exception as e:
+        logger.warning("[stats] Falha ao recomputar métricas por agente: %s", e)
+    # Recompute per-queue stats today (UTC)
+    try:
+        today_iso = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        q_pipeline = [
+            {"$match": {"tenant_id": tid, "started_at": {"$gte": today_iso},
+                        "queue_id": {"$ne": None}}},
+            {"$group": {"_id": "$queue_id",
+                        "answered": {"$sum": {"$cond": [{"$eq": ["$disposition", "answered"]}, 1, 0]}},
+                        "missed": {"$sum": {"$cond": [{"$in": ["$disposition", ["missed", "abandoned"]]}, 1, 0]}},
+                        "avg_wait": {"$avg": "$wait_sec"}}},
+        ]
+        async for row in db.calls.aggregate(q_pipeline):
+            await db.queues.update_one(
+                {"id": row["_id"], "tenant_id": tid},
+                {"$set": {"answered_today": int(row["answered"]),
+                          "missed_today": int(row["missed"]),
+                          "avg_wait_sec": int(row.get("avg_wait") or 0)}},
+            )
+    except Exception as e:
+        logger.warning("[stats] Falha ao recomputar métricas por fila: %s", e)
     summary["status"] = "error" if summary["errors"] and summary["agents_synced"] == 0 else "ok"
     await db.fusionpbx_settings.update_one(
         {"tenant_id": tid},

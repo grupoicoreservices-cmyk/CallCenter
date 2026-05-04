@@ -132,6 +132,17 @@ export default function FusionPBXSettings() {
     } catch (e) { toast.error(formatApiError(e.response?.data?.detail) || "Erro"); }
   }
 
+  async function fixCallDates() {
+    try {
+      const { data } = await api.post(`/fusionpbx/fix-call-dates${qs}`);
+      if (data.fixed > 0) {
+        toast.success(`${data.fixed} chamadas tiveram suas datas corrigidas. Recarregue o Dashboard.`);
+      } else {
+        toast.info("Nenhuma data precisava de correção.");
+      }
+    } catch (e) { toast.error(formatApiError(e.response?.data?.detail) || "Erro"); }
+  }
+
   async function loadDiag() {
     setDiagLoading(true);
     try {
@@ -390,6 +401,10 @@ sudo systemctl restart postgresql`}</pre>
             <Button variant="outline" onClick={resyncAgents} disabled={!form.enabled || !meta.configured}
                     className="text-blue-600 border-blue-200 hover:bg-blue-50" data-testid="fpbx-resync-agents">
               <Users size={14} className="mr-1.5" /> Re-sincronizar agentes
+            </Button>
+            <Button variant="outline" onClick={fixCallDates}
+                    className="text-amber-700 border-amber-200 hover:bg-amber-50" data-testid="fpbx-fix-dates">
+              <RefreshCw size={14} className="mr-1.5" /> Corrigir datas das chamadas
             </Button>
             <Button variant="outline" onClick={clearDemo} className="text-red-600 border-red-200 hover:bg-red-50 ml-auto" data-testid="fpbx-clear-demo">
               <Trash2 size={14} className="mr-1.5" /> Limpar dados simulados

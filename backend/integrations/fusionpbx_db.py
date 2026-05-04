@@ -165,8 +165,8 @@ class FusionPBXDBClient:
         try:
             sql = """SELECT xml_cdr_uuid::text, direction,
                             caller_id_number, caller_id_name, destination_number,
-                            start_stamp::text AS start_stamp,
-                            end_stamp::text AS end_stamp,
+                            to_char(start_stamp AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS') || '+00:00' AS start_stamp,
+                            to_char(end_stamp   AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS') || '+00:00' AS end_stamp,
                             duration, billsec, hangup_cause,
                             cc_queue, cc_agent, record_name
                      FROM v_xml_cdr

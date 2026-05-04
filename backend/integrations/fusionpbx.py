@@ -276,6 +276,48 @@ def normalize_queue(q: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _normalize_dt(v: Any) -> str:
+    """Convert any FusionPBX timestamp (str/datetime/epoch) to ISO 8601 with timezone.
+    Postgres returns 'YYYY-MM-DD HH:MM:SS' (no T, no tz) by default — Mongo string-compare
+    fails against ISO with T, breaking date-range filters. Always returns RFC3339-ish:
+    'YYYY-MM-DDTHH:MM:SS+00:00'."""
+    if v is None or v == "":
+        return ""
+    # asyncpg returns datetime objects directly when column is timestamp type
+    try:
+        from datetime import datetime, timezone as _tz, timedelta as _td
+        if isinstance(v, datetime):
+            if v.tzinfo is None:
+                v = v.replace(tzinfo=_tz.utc)
+            return v.isoformat()
+        s = str(v).strip()
+        # epoch (seconds or microseconds)
+        try:
+            n = float(s)
+            if n > 1e12: n = n / 1_000_000.0  # μs
+            elif n > 1e10: n = n / 1000.0     # ms
+            return datetime.fromtimestamp(n, tz=_tz.utc).isoformat()
+        except (ValueError, TypeError):
+            pass
+        # try fromisoformat (handles "YYYY-MM-DD HH:MM:SS" and ISO)
+        try:
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=_tz.utc)
+            return dt.isoformat()
+        except ValueError:
+            pass
+        # last resort: ensure 'T' between date and time so lexicographic compare works
+        if " " in s and len(s) >= 19:
+            iso = s.replace(" ", "T", 1)
+            if "+" not in iso and "Z" not in iso:
+                iso = iso + "+00:00"
+            return iso
+        return s
+    except Exception:
+        return str(v) if v else ""
+
+
 def normalize_cdr(c: Dict[str, Any]) -> Dict[str, Any]:
     """Map FusionPBX xml_cdr row to our `calls` schema. Best-effort across variants."""
     direction = c.get("direction") or "inbound"
@@ -301,7 +343,7 @@ def normalize_cdr(c: Dict[str, Any]) -> Dict[str, Any]:
         "wait_sec": int(c.get("waitsec") or 0),
         "disposition": disposition,
         "abandonment_type": "agent_loss" if disposition == "missed" else ("queue_abandon" if disposition == "abandoned" else None),
-        "started_at": c.get("start_stamp") or c.get("start_date") or "",
-        "ended_at": c.get("end_stamp") or c.get("end_date") or "",
+        "started_at": _normalize_dt(c.get("start_stamp") or c.get("start_date") or c.get("start_epoch")),
+        "ended_at": _normalize_dt(c.get("end_stamp") or c.get("end_date") or c.get("end_epoch")),
         "recording_uuid": c.get("record_name") or c.get("recording_uuid"),
     }
