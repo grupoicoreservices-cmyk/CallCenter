@@ -27,6 +27,7 @@ export default function FusionPBXSettings() {
     path_extensions: "", path_queues: "", path_agents: "", path_cdr: "",
     db_host: "", db_port: 5432, db_name: "fusionpbx",
     db_username: "", db_password: "", db_ssl: false,
+    esl_host: "", esl_port: 8021, esl_password: "", esl_timeout: 5.0,
   });
   const [meta, setMeta] = useState({});
   const [saving, setSaving] = useState(false);
@@ -55,9 +56,14 @@ export default function FusionPBXSettings() {
         db_username: data.db_username || "",
         db_password: "",
         db_ssl: !!data.db_ssl,
+        esl_host: data.esl_host || "",
+        esl_port: data.esl_port || 8021,
+        esl_password: "",
+        esl_timeout: data.esl_timeout || 5.0,
       });
       setMeta({
         configured: data.configured, api_key_set: data.api_key_set, password_set: data.password_set,
+        esl_password_set: data.esl_password_set, esl_configured: data.esl_configured,
         last_sync_at: data.last_sync_at, last_sync_status: data.last_sync_status,
       });
     } catch (e) { /* ignore */ }
@@ -72,6 +78,7 @@ export default function FusionPBXSettings() {
       if (!payload.api_key) delete payload.api_key;
       if (!payload.password) delete payload.password;
       if (!payload.db_password) delete payload.db_password;
+      if (!payload.esl_password) delete payload.esl_password;
       await api.put(`/fusionpbx/settings${qs}`, payload);
       toast.success("Configuração salva");
       load();
@@ -141,6 +148,17 @@ export default function FusionPBXSettings() {
         toast.info("Nenhuma data precisava de correção.");
       }
     } catch (e) { toast.error(formatApiError(e.response?.data?.detail) || "Erro"); }
+  }
+
+  async function testESL() {
+    setTesting(true);
+    try {
+      const { data } = await api.post(`/fusionpbx/esl/test${qs}`);
+      const ch = data.active_channels;
+      const status = data.status?.[0] || "ok";
+      toast.success(`ESL conectado · ${ch != null ? ch + ' canais ativos' : 'OK'} · ${status.slice(0,80)}`);
+    } catch (e) { toast.error(formatApiError(e.response?.data?.detail) || "Erro ESL"); }
+    finally { setTesting(false); }
   }
 
   async function loadDiag() {
@@ -347,6 +365,50 @@ sudo systemctl restart postgresql`}</pre>
             <div><Label>Intervalo Sync (min)</Label>
               <Input type="number" min={1} value={form.sync_interval_minutes}
                      onChange={(e) => setForm({ ...form, sync_interval_minutes: parseInt(e.target.value) || 1 })} />
+            </div>
+          </div>
+
+          <div className="border border-blue-200 bg-blue-50/40 rounded-sm p-3 space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-xs font-medium text-blue-900">
+                <PhoneCall size={12} />
+                ESL · Chamadas em tempo real <span className="font-normal text-[10px] text-muted-foreground">(Event Socket do FreeSWITCH · porta 8021)</span>
+              </div>
+              {meta.esl_configured && (
+                <span className="text-[10px] uppercase tracking-widest text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded">ativo</span>
+              )}
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              <div className="col-span-2">
+                <Label className="text-[11px]">Host ESL</Label>
+                <Input value={form.esl_host}
+                       onChange={(e) => setForm({ ...form, esl_host: e.target.value })}
+                       placeholder="51.222.195.17 (geralmente o mesmo do FusionPBX)" data-testid="fpbx-esl-host" />
+              </div>
+              <div>
+                <Label className="text-[11px]">Porta</Label>
+                <Input type="number" value={form.esl_port}
+                       onChange={(e) => setForm({ ...form, esl_port: parseInt(e.target.value) || 8021 })}
+                       data-testid="fpbx-esl-port" />
+              </div>
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              <div className="col-span-2">
+                <Label className="text-[11px]">Senha ESL {meta.esl_password_set && <span className="text-[10px] text-emerald-600 ml-1">✓ configurada</span>}</Label>
+                <Input type="password" value={form.esl_password}
+                       onChange={(e) => setForm({ ...form, esl_password: e.target.value })}
+                       placeholder={meta.esl_password_set ? "(deixe vazio para manter)" : "ClueCon (default)"} data-testid="fpbx-esl-password" />
+              </div>
+              <div className="flex items-end">
+                <Button type="button" variant="outline" onClick={testESL}
+                        disabled={testing || !form.esl_host} className="w-full" data-testid="fpbx-esl-test">
+                  {testing ? "Testando…" : "Testar ESL"}
+                </Button>
+              </div>
+            </div>
+            <div className="text-[11px] text-muted-foreground border-t border-blue-100 pt-2">
+              💡 No FusionPBX edite <code className="bg-zinc-100 px-1 py-0.5 rounded">/etc/freeswitch/autoload_configs/event_socket.conf.xml</code>:
+              defina <code className="bg-zinc-100 px-1 py-0.5 rounded">listen-ip = 0.0.0.0</code>, anote o <code className="bg-zinc-100 px-1 py-0.5 rounded">password</code>, e libere a porta 8021 só para o IP {window.location.hostname}.
             </div>
           </div>
 

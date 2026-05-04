@@ -26,6 +26,9 @@ from integrations.fusionpbx import (
     normalize_extension, normalize_agent, normalize_queue, normalize_cdr,
 )
 from integrations.fusionpbx_db import FusionPBXDBClient, FusionPBXDBError
+from integrations.freeswitch_esl import (
+    FreeSwitchESL, FreeSwitchESLError, normalize_esl_channel,
+)
 
 EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
 
@@ -870,10 +873,53 @@ async def dashboard_abandoned(user: dict = Depends(require_permission("dashboard
 async def realtime_calls(user: dict = Depends(require_permission("realtime.view"))):
     f = tenant_filter(user)
     tid = tenant_scope(user)
-    # Try to get live calls from FusionPBX if integration is enabled
     if tid:
         s = await db.fusionpbx_settings.find_one({"tenant_id": tid})
         if s and s.get("enabled"):
+            # 1) Try ESL first (most reliable for live channels)
+            if s.get("esl_host"):
+                try:
+                    esl = FreeSwitchESL(
+                        host=s["esl_host"], port=int(s.get("esl_port") or 8021),
+                        password=s.get("esl_password") or "ClueCon",
+                        timeout=float(s.get("esl_timeout") or 5.0),
+                    )
+                    rows = await esl.show_channels()
+                    if rows is not None:
+                        agents_db = await db.agents.find(f, {"_id": 0}).to_list(500)
+                        ext_to_agent = {a.get("extension"): a for a in agents_db if a.get("extension")}
+                        # filter by domain if domain_name set
+                        domain_name = (s.get("domain_name") or "").strip().lower()
+                        calls = []
+                        for raw in rows:
+                            n = normalize_esl_channel(raw)
+                            # filter by domain (presence_id or context contains domain)
+                            if domain_name:
+                                pid = (raw.get("presence_id") or "").lower()
+                                ctx = (raw.get("context") or "").lower()
+                                if domain_name not in pid and domain_name not in ctx:
+                                    continue
+                            ext = n["destination_number"] or n["caller_id_number"]
+                            ag = ext_to_agent.get(ext) or {}
+                            elapsed = 0
+                            if n["created_epoch"]:
+                                elapsed = int(time.time() - n["created_epoch"])
+                            calls.append({
+                                "id": n["uuid"] or str(uuid.uuid4()),
+                                "agent_name": ag.get("name") or n["caller_id_name"] or "—",
+                                "agent_extension": ext or "—",
+                                "agent_avatar": ag.get("avatar"),
+                                "queue_name": "—",
+                                "caller_number": n["caller_id_number"] or "—",
+                                "direction": n["direction"],
+                                "elapsed_sec": elapsed,
+                                "status": "incall" if n["answer_state"] == "answered" else "ringing",
+                            })
+                        return {"calls": calls, "source": "esl"}
+                except FreeSwitchESLError as e:
+                    logger.warning("ESL falhou, tentando fallback: %s", e)
+
+            # 2) Fallback DB or REST (v_channels — pode não existir)
             ctype = s.get("connection_type") or "rest"
             client = None
             ClientErr: type = Exception
@@ -897,7 +943,6 @@ async def realtime_calls(user: dict = Depends(require_permission("realtime.view"
                 if client:
                     raw = await client.list_active_calls()
                     if raw:
-                        # Build extension → agent map for richer info
                         agents_db = await db.agents.find(f, {"_id": 0}).to_list(500)
                         ext_to_agent = {a.get("extension"): a for a in agents_db if a.get("extension")}
                         calls = []
@@ -906,7 +951,6 @@ async def realtime_calls(user: dict = Depends(require_permission("realtime.view"
                             ag = ext_to_agent.get(ext) or {}
                             answer_state = (c.get("answer_state") or c.get("channel_state") or "").lower()
                             is_answered = "answered" in answer_state or "exchange_media" in answer_state or answer_state == "cs_execute"
-                            # duration: from created_epoch if available
                             elapsed = 0
                             try:
                                 if c.get("created_epoch"):
@@ -928,10 +972,10 @@ async def realtime_calls(user: dict = Depends(require_permission("realtime.view"
                             })
                         return {"calls": calls, "source": "fusionpbx"}
             except ClientErr as e:
-                logger.warning("realtime/calls falhou (%s): %s", ctype, e)
+                logger.warning("realtime/calls fallback %s falhou: %s", ctype, e)
             except Exception as e:
                 logger.warning("realtime/calls erro inesperado: %s", e)
-    # Fallback: just show agents currently in "incall" status (no fake data)
+    # Final fallback
     agents = await db.agents.find({**f, "status": "incall"}, {"_id": 0}).to_list(100)
     queues = {q["id"]: q for q in await db.queues.find(f, {"_id": 0}).to_list(100)}
     active = []
@@ -1528,6 +1572,11 @@ class FusionPBXSettings(BaseModel):
     db_username: Optional[str] = None
     db_password: Optional[str] = None
     db_ssl: bool = False
+    # ESL (Event Socket) — for live calls
+    esl_host: Optional[str] = None
+    esl_port: int = 8021
+    esl_password: Optional[str] = None
+    esl_timeout: float = 5.0
     # Common
     domain_uuid: Optional[str] = None
     domain_name: Optional[str] = None
@@ -1542,6 +1591,7 @@ def _serialize_fusion_settings(s: Optional[dict], mask: bool = True) -> dict:
         "verify_ssl", "sync_interval_minutes", "last_sync_at", "last_sync_status",
         "path_extensions", "path_queues", "path_agents", "path_cdr",
         "db_host", "db_port", "db_name", "db_username", "db_ssl",
+        "esl_host", "esl_port", "esl_timeout",
     ]}
     out["connection_type"] = s.get("connection_type") or "rest"
     if out["connection_type"] == "db":
@@ -1551,10 +1601,13 @@ def _serialize_fusion_settings(s: Optional[dict], mask: bool = True) -> dict:
     out["api_key_set"] = bool(s.get("api_key"))
     out["password_set"] = bool(s.get("password"))
     out["db_password_set"] = bool(s.get("db_password"))
+    out["esl_password_set"] = bool(s.get("esl_password"))
+    out["esl_configured"] = bool(s.get("esl_host"))
     if not mask:
         out["api_key"] = s.get("api_key")
         out["password"] = s.get("password")
         out["db_password"] = s.get("db_password")
+        out["esl_password"] = s.get("esl_password")
     return out
 
 
@@ -1922,7 +1975,7 @@ async def put_fusion_settings(body: FusionPBXSettings, user: dict = Depends(get_
     payload = body.dict(exclude_unset=True)
     existing = await db.fusionpbx_settings.find_one({"tenant_id": tid}) or {}
     # Don't overwrite secrets if a masked/empty value was sent and one already exists
-    for k in ("api_key", "password"):
+    for k in ("api_key", "password", "db_password", "esl_password"):
         if k in payload and not payload[k]:
             payload[k] = existing.get(k)
     payload["tenant_id"] = tid
@@ -1962,6 +2015,41 @@ async def _build_fusion_client(tid: str):
         verify_ssl=bool(s.get("verify_ssl", True)),
         custom_paths=custom_paths,
     )
+
+
+@api.post("/fusionpbx/esl/test")
+async def fusion_esl_test(user: dict = Depends(get_current_user), tenant_id: Optional[str] = None):
+    tid = await _resolve_tenant_for_fusion(user, tenant_id)
+    if user.get("role") not in ("super_admin", "admin"):
+        raise HTTPException(status_code=403, detail="Sem permissão")
+    s = await db.fusionpbx_settings.find_one({"tenant_id": tid})
+    if not s or not s.get("esl_host"):
+        raise HTTPException(status_code=400, detail="Configure ESL host primeiro")
+    # TCP pré-check
+    import socket
+    try:
+        with socket.create_connection((s["esl_host"], int(s.get("esl_port") or 8021)), timeout=4):
+            pass
+    except Exception as e:
+        raise HTTPException(status_code=502,
+            detail=f"Não consegui abrir TCP em {s['esl_host']}:{s.get('esl_port', 8021)} → "
+                   f"[{type(e).__name__}] {e}. Libere a porta no firewall do FusionPBX e configure event_socket.conf.xml.")
+    esl = FreeSwitchESL(
+        host=s["esl_host"], port=int(s.get("esl_port") or 8021),
+        password=s.get("esl_password") or "ClueCon",
+        timeout=float(s.get("esl_timeout") or 5.0),
+    )
+    try:
+        result = await esl.ping()
+        # também conta canais ativos
+        try:
+            rows = await esl.show_channels()
+            result["active_channels"] = len(rows)
+        except Exception:
+            result["active_channels"] = None
+        return {"ok": True, **result}
+    except FreeSwitchESLError as e:
+        raise HTTPException(status_code=502, detail=str(e))
 
 
 @api.post("/fusionpbx/test")
