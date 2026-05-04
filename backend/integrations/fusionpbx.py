@@ -238,6 +238,31 @@ def normalize_extension(ext: Dict[str, Any]) -> Dict[str, Any]:
         "name": ext.get("effective_caller_id_name") or ext.get("description") or ext.get("name") or f"Ramal {ext.get('extension', '?')}",
         "username": ext.get("user") or ext.get("username") or str(ext.get("extension", "")),
         "email": ext.get("mwi_account") or ext.get("email") or "",
+        "source": "extension",
+    }
+
+
+def normalize_agent(a: Dict[str, Any]) -> Dict[str, Any]:
+    """Map FusionPBX call-center agent fields to our internal agent shape.
+    Prefers agent_id (login) and agent_name; uses agent_contact for the extension."""
+    extension = a.get("extension_from_contact") or ""
+    if not extension:
+        # fallback: tenta extrair do agent_contact "{...}user/1001@domain"
+        contact = (a.get("agent_contact") or "")
+        import re
+        m = re.search(r"user[/=](\d+)", contact)
+        if m:
+            extension = m.group(1)
+    return {
+        "external_id": a.get("call_center_agent_uuid"),
+        "extension": str(extension or a.get("agent_id") or ""),
+        "name": a.get("agent_name") or f"Agente {a.get('agent_id', '?')}",
+        "username": a.get("agent_id") or "",
+        "email": "",
+        "agent_status": a.get("agent_status"),
+        "agent_state": a.get("agent_state"),
+        "agent_type": a.get("agent_type"),
+        "source": "call_center_agent",
     }
 
 

@@ -118,6 +118,20 @@ export default function FusionPBXSettings() {
     } catch (e) { toast.error(formatApiError(e.response?.data?.detail) || "Erro"); }
   }
 
+  async function resyncAgents() {
+    if (!window.confirm(
+      "Esta ação vai REMOVER todos os agentes já sincronizados e buscar novamente do FusionPBX.\n\n" +
+      "Use isto se você criou agentes (Apps → Call Center → Agents) e quer que eles substituam os ramais sincronizados anteriormente.\n\n" +
+      "Continuar?"
+    )) return;
+    try {
+      const { data } = await api.post(`/fusionpbx/resync-agents${qs}`);
+      const src = data.summary?.agent_source === "call_center_agent" ? "agentes do Call Center" : "ramais (sem agentes cadastrados)";
+      toast.success(`${data.deleted} antigos removidos · ${data.summary?.agents_synced || 0} novos importados (fonte: ${src})`);
+      if (tab === "diag") loadDiag();
+    } catch (e) { toast.error(formatApiError(e.response?.data?.detail) || "Erro"); }
+  }
+
   async function loadDiag() {
     setDiagLoading(true);
     try {
@@ -372,6 +386,10 @@ sudo systemctl restart postgresql`}</pre>
             </Button>
             <Button variant="default" onClick={sync} disabled={syncing || !form.enabled || !meta.configured} data-testid="fpbx-sync">
               <RefreshCw size={14} className="mr-1.5" />{syncing ? "Sincronizando…" : "Sincronizar Agora"}
+            </Button>
+            <Button variant="outline" onClick={resyncAgents} disabled={!form.enabled || !meta.configured}
+                    className="text-blue-600 border-blue-200 hover:bg-blue-50" data-testid="fpbx-resync-agents">
+              <Users size={14} className="mr-1.5" /> Re-sincronizar agentes
             </Button>
             <Button variant="outline" onClick={clearDemo} className="text-red-600 border-red-200 hover:bg-red-50 ml-auto" data-testid="fpbx-clear-demo">
               <Trash2 size={14} className="mr-1.5" /> Limpar dados simulados

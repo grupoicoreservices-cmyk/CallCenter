@@ -22,7 +22,7 @@ from integrations.asaas import AsaasClient, AsaasError, map_asaas_status
 from integrations.paypal import PayPalClient, PayPalError, map_paypal_status
 from integrations.fusionpbx import (
     FusionPBXClient, FusionPBXError,
-    normalize_extension, normalize_queue, normalize_cdr,
+    normalize_extension, normalize_agent, normalize_queue, normalize_cdr,
 )
 from integrations.fusionpbx_db import FusionPBXDBClient, FusionPBXDBError
 
@@ -1899,6 +1899,25 @@ async def fusion_clear_demo_data(user: dict = Depends(get_current_user), tenant_
     return {"ok": True, "deleted": deleted, "tenant_id": tid}
 
 
+@api.post("/fusionpbx/resync-agents")
+async def fusion_resync_agents(user: dict = Depends(get_current_user), tenant_id: Optional[str] = None):
+    """Wipe all synced agents (real ones from PBX) and re-fetch from FusionPBX.
+    Use when the source changed (e.g., switched from extensions to call_center_agents)
+    or when agents got renamed in the PBX."""
+    tid = await _resolve_tenant_for_fusion(user, tenant_id)
+    if user.get("role") not in ("super_admin", "admin"):
+        raise HTTPException(status_code=403, detail="Sem permissão")
+    # Remove apenas agents sincronizados (com external_id)
+    res = await db.agents.delete_many({"tenant_id": tid, "external_id": {"$ne": None}})
+    deleted_agents = res.deleted_count
+    # Roda sync para repopular
+    summary = await _run_sync_for_tenant(tid)
+    await write_audit(user, "resync", "agents", tid,
+                      f"Resincronização de agentes ({deleted_agents} removidos)",
+                      {"deleted": deleted_agents, "summary": summary})
+    return {"ok": True, "deleted": deleted_agents, "summary": summary}
+
+
 async def _run_sync_for_tenant(tid: str, cdr_limit: int = 200) -> Dict[str, Any]:
     """Core sync logic reusable by manual endpoint + scheduler."""
     s = await db.fusionpbx_settings.find_one({"tenant_id": tid})
@@ -1928,36 +1947,54 @@ async def _run_sync_for_tenant(tid: str, cdr_limit: int = 200) -> Dict[str, Any]
         )
         ClientErr = FusionPBXError
     summary = {"agents_synced": 0, "queues_synced": 0, "calls_synced": 0,
-               "errors": [], "started_at": datetime.now(timezone.utc).isoformat()}
-    # Extensions
+               "errors": [], "started_at": datetime.now(timezone.utc).isoformat(),
+               "agent_source": None}
+    # Agents — preferimos call_center_agents (entidade dedicada).
+    # Se não houver agentes cadastrados, caímos para extensions (ramais).
+    agent_records: list = []
+    agent_source = "call_center_agent"
     try:
-        exts = await client.list_extensions()
-        for raw in exts:
-            ext = normalize_extension(raw)
-            if not ext["external_id"]: continue
-            existing = await db.agents.find_one({"tenant_id": tid, "external_id": ext["external_id"]})
-            doc = {
-                "tenant_id": tid, "external_id": ext["external_id"],
-                "name": ext["name"], "username": ext["username"],
-                "extension": ext["extension"], "email": ext["email"],
-                "avatar": existing.get("avatar") if existing else AGENT_AVATARS[summary["agents_synced"] % len(AGENT_AVATARS)],
-                "status": existing.get("status") if existing else "offline",
-                "queues": existing.get("queues", []) if existing else [],
-                "calls_handled": existing.get("calls_handled", 0) if existing else 0,
-                "avg_handle_sec": existing.get("avg_handle_sec", 0) if existing else 0,
-                "csat": existing.get("csat", 0) if existing else 0,
-                "adherence_pct": existing.get("adherence_pct", 0) if existing else 0,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            }
-            if existing:
-                await db.agents.update_one({"id": existing["id"]}, {"$set": doc})
-            else:
-                doc["id"] = str(uuid.uuid4())
-                doc["created_at"] = doc["updated_at"]
-                await db.agents.insert_one(doc)
-            summary["agents_synced"] += 1
+        cc_agents = await client.list_call_center_agents()
+        if cc_agents:
+            agent_records = [normalize_agent(a) for a in cc_agents]
+        else:
+            agent_source = "extension"
+            exts = await client.list_extensions()
+            agent_records = [normalize_extension(e) for e in exts]
     except ClientErr as e:
-        summary["errors"].append(f"extensions: {e}")
+        # Se falhar agentes, ainda tenta extensões
+        try:
+            agent_source = "extension"
+            exts = await client.list_extensions()
+            agent_records = [normalize_extension(e) for e in exts]
+        except ClientErr as e2:
+            summary["errors"].append(f"agents: {e} | extensions: {e2}")
+    summary["agent_source"] = agent_source
+    for ag in agent_records:
+        if not ag["external_id"]: continue
+        existing = await db.agents.find_one({"tenant_id": tid, "external_id": ag["external_id"]})
+        doc = {
+            "tenant_id": tid, "external_id": ag["external_id"],
+            "name": ag["name"], "username": ag.get("username", ""),
+            "extension": ag.get("extension", ""), "email": ag.get("email", ""),
+            "source": ag.get("source", "extension"),
+            "agent_type": ag.get("agent_type"),
+            "avatar": existing.get("avatar") if existing else AGENT_AVATARS[summary["agents_synced"] % len(AGENT_AVATARS)],
+            "status": existing.get("status") if existing else "offline",
+            "queues": existing.get("queues", []) if existing else [],
+            "calls_handled": existing.get("calls_handled", 0) if existing else 0,
+            "avg_handle_sec": existing.get("avg_handle_sec", 0) if existing else 0,
+            "csat": existing.get("csat", 0) if existing else 0,
+            "adherence_pct": existing.get("adherence_pct", 0) if existing else 0,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if existing:
+            await db.agents.update_one({"id": existing["id"]}, {"$set": doc})
+        else:
+            doc["id"] = str(uuid.uuid4())
+            doc["created_at"] = doc["updated_at"]
+            await db.agents.insert_one(doc)
+        summary["agents_synced"] += 1
     # Queues
     try:
         queues = await client.list_call_center_queues()
@@ -1987,15 +2024,30 @@ async def _run_sync_for_tenant(tid: str, cdr_limit: int = 200) -> Dict[str, Any]
     # CDR
     try:
         cdrs = await client.list_cdr(limit=cdr_limit)
-        agent_map = {a["external_id"]: a for a in await db.agents.find(
-            {"tenant_id": tid, "external_id": {"$ne": None}}, {"_id": 0}).to_list(2000)}
+        # Build multiple lookup keys to match agents from CDR (cc_agent can be: uuid, agent_id, extension)
+        agents_db = await db.agents.find(
+            {"tenant_id": tid, "external_id": {"$ne": None}}, {"_id": 0}).to_list(2000)
+        agent_map = {}
+        for a in agents_db:
+            if a.get("external_id"): agent_map[a["external_id"]] = a
+            if a.get("username"):    agent_map[a["username"]] = a
+            if a.get("extension"):   agent_map[a["extension"]] = a
+            # FusionPBX uses "agent_id@domain" — also index without domain
+            if a.get("username") and "@" not in a["username"] and s.get("domain_name"):
+                agent_map[f"{a['username']}@{s['domain_name']}"] = a
         queue_map = {q["external_id"]: q for q in await db.queues.find(
             {"tenant_id": tid, "external_id": {"$ne": None}}, {"_id": 0}).to_list(2000)}
         for raw in cdrs:
             n = normalize_cdr(raw)
             if not n["external_id"]: continue
             existing = await db.calls.find_one({"tenant_id": tid, "external_id": n["external_id"]})
-            agent = agent_map.get(n["agent_external_id"]) if n["agent_external_id"] else None
+            # try multiple candidates for agent matching
+            cc_agent = (n.get("agent_external_id") or "").strip()
+            agent = None
+            if cc_agent:
+                agent = agent_map.get(cc_agent)
+                if not agent and "@" in cc_agent:
+                    agent = agent_map.get(cc_agent.split("@", 1)[0])
             queue = queue_map.get(n["queue_external_id"]) if n["queue_external_id"] else None
             doc = {
                 "tenant_id": tid, "external_id": n["external_id"],

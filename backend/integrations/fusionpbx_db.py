@@ -114,10 +114,18 @@ class FusionPBXDBClient:
         try:
             try:
                 rows = await conn.fetch(
-                    """SELECT call_center_agent_uuid::text, agent_name, agent_id,
-                              agent_status, agent_state, agent_contact, agent_type
-                       FROM v_call_center_agents
-                       WHERE domain_uuid = $1::uuid""",
+                    """SELECT
+                          a.call_center_agent_uuid::text AS call_center_agent_uuid,
+                          a.agent_name, a.agent_id,
+                          a.agent_status, a.agent_state,
+                          a.agent_contact, a.agent_type,
+                          a.agent_call_timeout,
+                          a.agent_no_answer_delay_time,
+                          -- tenta extrair extensão do agent_contact (ex: user/1001@domain)
+                          (regexp_match(a.agent_contact, 'user[/=]([0-9]+)'))[1] AS extension_from_contact
+                       FROM v_call_center_agents a
+                       WHERE a.domain_uuid = $1::uuid
+                       ORDER BY a.agent_name""",
                     self.domain_uuid,
                 )
                 return [dict(r) for r in rows]
