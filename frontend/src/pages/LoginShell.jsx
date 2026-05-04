@@ -189,11 +189,13 @@ const MODE_META = {
 };
 
 function PortalLinks({ current, dark = false }) {
+  // Admin portal é "secret" — só aparece quando o usuário já está em /admin.
+  // Nas páginas /login (agente) e /master, mostramos apenas o link recíproco.
   const items = [
     { mode: "agent",  href: "/login",  label: "Agente",       icon: User },
     { mode: "master", href: "/master", label: "Master",       icon: ShieldCheck },
     { mode: "admin",  href: "/admin",  label: "Super Admin",  icon: Crown },
-  ].filter(i => i.mode !== current);
+  ].filter(i => i.mode !== current && (i.mode !== "admin" || current === "admin"));
   const cls = dark
     ? "text-muted-foreground hover:text-foreground"
     : "text-zinc-400 hover:text-zinc-100";
