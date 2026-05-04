@@ -1834,7 +1834,38 @@ async def fusion_test(user: dict = Depends(get_current_user), tenant_id: Optiona
     if user.get("role") not in ("super_admin", "admin"):
         raise HTTPException(status_code=403, detail="Sem permissão")
     s = await db.fusionpbx_settings.find_one({"tenant_id": tid})
-    if not s or not s.get("base_url"):
+    if not s:
+        raise HTTPException(status_code=400, detail="Configure a integração primeiro")
+    ctype = s.get("connection_type") or "rest"
+
+    if ctype == "db":
+        if not s.get("db_host") or not s.get("db_username"):
+            raise HTTPException(status_code=400, detail="Configure host e usuário do PostgreSQL")
+        # Pré-checagem: TCP reach (firewall/route)
+        import socket
+        try:
+            with socket.create_connection((s["db_host"], int(s.get("db_port") or 5432)), timeout=5):
+                tcp_ok = True
+        except Exception as e:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Não consegui abrir TCP em {s['db_host']}:{s.get('db_port', 5432)} → "
+                       f"[{type(e).__name__}] {e}. Verifique firewall (iptables/ufw), pg_hba.conf e listen_addresses."
+            )
+        client = FusionPBXDBClient(
+            host=s["db_host"], port=int(s.get("db_port") or 5432),
+            database=s.get("db_name") or "fusionpbx",
+            username=s["db_username"], password=s.get("db_password") or "",
+            domain_uuid=s.get("domain_uuid"), ssl=bool(s.get("db_ssl")),
+        )
+        try:
+            result = await client.ping()
+            return {"ok": True, "tcp_reachable": tcp_ok, "mode": "db", **result}
+        except FusionPBXDBError as e:
+            raise HTTPException(status_code=502, detail=str(e))
+
+    # REST mode
+    if not s.get("base_url"):
         raise HTTPException(status_code=400, detail="Configure base_url primeiro")
     client = FusionPBXClient(
         base_url=s["base_url"], api_key=s.get("api_key"),
@@ -1844,7 +1875,7 @@ async def fusion_test(user: dict = Depends(get_current_user), tenant_id: Optiona
     )
     try:
         result = await client.ping()
-        return {"ok": True, **result}
+        return {"ok": True, "mode": "rest", **result}
     except FusionPBXError as e:
         raise HTTPException(status_code=502, detail=str(e))
 

@@ -40,7 +40,14 @@ class FusionPBXDBClient:
                 command_timeout=30,
             )
         except Exception as e:
-            raise FusionPBXDBError(f"Falha na conexão PostgreSQL: {e}") from e
+            # asyncpg às vezes retorna exceção sem mensagem (ex.: TimeoutError).
+            # Inclui tipo + repr para o usuário enxergar a causa real.
+            etype = type(e).__name__
+            msg = str(e) or repr(e)
+            target = f"{self.username}@{self.host}:{self.port}/{self.database}"
+            raise FusionPBXDBError(
+                f"Falha PostgreSQL [{etype}] em {target}: {msg}"
+            ) from e
 
     async def ping(self) -> Dict[str, Any]:
         conn = await self._connect()
