@@ -80,30 +80,41 @@ class FusionPBXDBClient:
             raise FusionPBXDBError("domain_uuid obrigatório")
         conn = await self._connect()
         try:
-            # Tabela call_center é opcional. Tenta queues, se não existir tenta ring_groups
-            try:
-                rows = await conn.fetch(
-                    """SELECT call_center_queue_uuid::text, queue_name, queue_extension,
-                              queue_strategy, queue_max_wait_time
-                       FROM v_call_center_queues
-                       WHERE domain_uuid = $1::uuid
-                       ORDER BY queue_extension""",
-                    self.domain_uuid,
+            # Verifica se tabela call_center existe
+            tbl = await conn.fetchval(
+                "SELECT to_regclass('public.v_call_center_queues')::text"
+            )
+            if tbl:
+                col_rows = await conn.fetch(
+                    """SELECT column_name FROM information_schema.columns
+                       WHERE table_name = 'v_call_center_queues'"""
                 )
+                cols = {r["column_name"] for r in col_rows}
+                pieces = ["call_center_queue_uuid::text AS call_center_queue_uuid"]
+                for c, default in [
+                    ("queue_name", "NULL"),
+                    ("queue_extension", "NULL"),
+                    ("queue_strategy", "NULL"),
+                    ("queue_max_wait_time", "120"),
+                ]:
+                    pieces.append(f"{c}" if c in cols else f"{default}::text AS {c}")
+                sql = (f"SELECT {', '.join(pieces)} FROM v_call_center_queues "
+                       f"WHERE domain_uuid = $1::uuid")
+                rows = await conn.fetch(sql, self.domain_uuid)
                 return [dict(r) for r in rows]
-            except asyncpg.UndefinedTableError:
-                rows = await conn.fetch(
-                    """SELECT ring_group_uuid::text AS call_center_queue_uuid,
-                              ring_group_name AS queue_name,
-                              ring_group_extension AS queue_extension,
-                              ring_group_strategy AS queue_strategy,
-                              60 AS queue_max_wait_time
-                       FROM v_ring_groups
-                       WHERE domain_uuid = $1::uuid AND ring_group_enabled = 'true'
-                       ORDER BY ring_group_extension""",
-                    self.domain_uuid,
-                )
-                return [dict(r) for r in rows]
+            # Fallback: ring_groups
+            rows = await conn.fetch(
+                """SELECT ring_group_uuid::text AS call_center_queue_uuid,
+                          ring_group_name AS queue_name,
+                          ring_group_extension AS queue_extension,
+                          ring_group_strategy AS queue_strategy,
+                          60 AS queue_max_wait_time
+                   FROM v_ring_groups
+                   WHERE domain_uuid = $1::uuid AND ring_group_enabled = 'true'
+                   ORDER BY ring_group_extension""",
+                self.domain_uuid,
+            )
+            return [dict(r) for r in rows]
         finally:
             await conn.close()
 
@@ -112,25 +123,37 @@ class FusionPBXDBClient:
             return []
         conn = await self._connect()
         try:
+            # Descobre quais colunas existem (varia entre versões do FusionPBX)
             try:
-                rows = await conn.fetch(
-                    """SELECT
-                          a.call_center_agent_uuid::text AS call_center_agent_uuid,
-                          a.agent_name, a.agent_id,
-                          a.agent_status, a.agent_state,
-                          a.agent_contact, a.agent_type,
-                          a.agent_call_timeout,
-                          a.agent_no_answer_delay_time,
-                          -- tenta extrair extensão do agent_contact (ex: user/1001@domain)
-                          (regexp_match(a.agent_contact, 'user[/=]([0-9]+)'))[1] AS extension_from_contact
-                       FROM v_call_center_agents a
-                       WHERE a.domain_uuid = $1::uuid
-                       ORDER BY a.agent_name""",
-                    self.domain_uuid,
+                col_rows = await conn.fetch(
+                    """SELECT column_name FROM information_schema.columns
+                       WHERE table_name = 'v_call_center_agents'"""
                 )
-                return [dict(r) for r in rows]
-            except asyncpg.UndefinedTableError:
+            except Exception:
                 return []
+            cols = {r["column_name"] for r in col_rows}
+            if not cols or "call_center_agent_uuid" not in cols:
+                return []
+            wanted = [
+                "call_center_agent_uuid", "agent_name", "agent_id",
+                "agent_status", "agent_state", "agent_contact",
+                "agent_type", "agent_call_timeout", "agent_no_answer_delay_time",
+            ]
+            select_cols = []
+            for c in wanted:
+                if c == "call_center_agent_uuid":
+                    select_cols.append("a.call_center_agent_uuid::text AS call_center_agent_uuid")
+                elif c in cols:
+                    select_cols.append(f"a.{c}")
+                else:
+                    select_cols.append(f"NULL::text AS {c}")
+            sql = f"""SELECT {', '.join(select_cols)},
+                            (regexp_match(COALESCE(a.agent_contact,''), 'user[/=]([0-9]+)'))[1] AS extension_from_contact
+                     FROM v_call_center_agents a
+                     WHERE a.domain_uuid = $1::uuid
+                     ORDER BY a.agent_name"""
+            rows = await conn.fetch(sql, self.domain_uuid)
+            return [dict(r) for r in rows]
         finally:
             await conn.close()
 
