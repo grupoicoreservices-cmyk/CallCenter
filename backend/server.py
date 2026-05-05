@@ -1065,7 +1065,31 @@ async def realtime_calls(user: dict = Depends(require_permission("realtime.view"
 
 @api.get("/agents")
 async def list_agents(user: dict = Depends(require_permission("agents.view"))):
-    items = await db.agents.find(tenant_filter(user), {"_id": 0}).to_list(500)
+    f = tenant_filter(user)
+    items = await db.agents.find(f, {"_id": 0}).to_list(500)
+    # Enrich with missed_count and avg_wait_sec (last 24h)
+    cutoff_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    pipeline = [
+        {"$match": {**f, "started_at": {"$gte": cutoff_24h}, "agent_id": {"$ne": None}}},
+        {"$group": {
+            "_id": "$agent_id",
+            "missed": {"$sum": {"$cond": [{"$in": ["$disposition", ["missed", "abandoned"]]}, 1, 0]}},
+            "answered": {"$sum": {"$cond": [{"$eq": ["$disposition", "answered"]}, 1, 0]}},
+            "avg_wait": {"$avg": "$wait_sec"},
+        }},
+    ]
+    stats: Dict[str, Dict[str, int]] = {}
+    async for r in db.calls.aggregate(pipeline):
+        stats[r["_id"]] = {
+            "missed_count": int(r.get("missed") or 0),
+            "answered_count": int(r.get("answered") or 0),
+            "avg_wait_sec": int(r.get("avg_wait") or 0),
+        }
+    for a in items:
+        s = stats.get(a["id"], {})
+        a["missed_count"] = s.get("missed_count", 0)
+        a["answered_count"] = s.get("answered_count", a.get("calls_handled", 0))
+        a["avg_wait_sec"] = s.get("avg_wait_sec", 0)
     return {"agents": items}
 
 @api.get("/agents/{agent_id}")

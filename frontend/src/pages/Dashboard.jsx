@@ -239,12 +239,20 @@ export default function Dashboard() {
                     <div className="text-xs text-muted-foreground font-mono">ext. {a.extension}</div>
                   </div>
                   <div className="text-right hidden sm:block">
-                    <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Chamadas</div>
-                    <div className="font-mono text-sm">{a.calls_handled}</div>
+                    <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Atendidas</div>
+                    <div className="font-mono text-sm text-emerald-700">{a.answered_count ?? a.calls_handled ?? 0}</div>
+                  </div>
+                  <div className="text-right hidden sm:block">
+                    <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Perdidas</div>
+                    <div className="font-mono text-sm text-red-600">{a.missed_count ?? 0}</div>
                   </div>
                   <div className="text-right hidden md:block">
-                    <div className="text-[10px] uppercase tracking-widest text-muted-foreground">CSAT</div>
-                    <div className="font-mono text-sm">{a.csat}</div>
+                    <div className="text-[10px] uppercase tracking-widest text-muted-foreground">TME</div>
+                    <div className="font-mono text-sm">{fmtDuration(a.avg_wait_sec ?? 0)}</div>
+                  </div>
+                  <div className="text-right hidden lg:block">
+                    <div className="text-[10px] uppercase tracking-widest text-muted-foreground">TMA</div>
+                    <div className="font-mono text-sm">{fmtDuration(a.avg_handle_sec ?? 0)}</div>
                   </div>
                   <StatusBadge status={a.status} />
                 </div>
