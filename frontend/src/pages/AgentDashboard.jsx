@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Headphones, Pause, LogOut as LogOutIcon, Loader2, Phone, Award, Clock, TrendingUp } from "lucide-react";
+import { Headphones, Pause, LogOut as LogOutIcon, Loader2, Phone, Award, Clock, TrendingUp, Users, PhoneIncoming } from "lucide-react";
 import { api, fmtDuration, formatApiError } from "../lib/api";
 import { useAuth } from "../contexts/AuthContext";
 import { Button } from "../components/ui/button";
@@ -12,10 +12,17 @@ const STATUS_OPTIONS = [
   { key: "offline", label: "Deslogado",   color: "bg-zinc-400",    text: "text-zinc-700",    bg: "bg-zinc-50 border-zinc-200",     icon: LogOutIcon },
 ];
 
+const DOT = {
+  online: "bg-emerald-500",
+  paused: "bg-amber-500",
+  offline: "bg-zinc-300",
+};
+
 export default function AgentDashboard() {
   const { user, logout } = useAuth();
   const [agent, setAgent] = useState(null);
   const [calls, setCalls] = useState([]);
+  const [queues, setQueues] = useState([]);
   const [loading, setLoading] = useState(true);
   const [updating, setUpdating] = useState(false);
 
@@ -23,8 +30,12 @@ export default function AgentDashboard() {
     try {
       const r = await api.get("/agents/me/info");
       setAgent(r.data.agent);
-      const rec = await api.get(`/agents/${r.data.agent.id}`).catch(() => ({ data: { recent_calls: [] } }));
+      const [rec, qs] = await Promise.all([
+        api.get(`/agents/${r.data.agent.id}`).catch(() => ({ data: { recent_calls: [] } })),
+        api.get("/agents/me/queue-status").catch(() => ({ data: { queues: [] } })),
+      ]);
       setCalls(rec.data.recent_calls || []);
+      setQueues(qs.data.queues || []);
     } catch (e) {
       toast.error(formatApiError(e.response?.data?.detail) || "Falha ao carregar perfil");
     } finally { setLoading(false); }
@@ -113,6 +124,63 @@ export default function AgentDashboard() {
         <KpiCard icon={Award} label="CSAT" value={`★ ${agent.csat || 0}`} />
         <KpiCard icon={TrendingUp} label="Aderência" value={`${agent.adherence_pct || 0}%`} />
       </div>
+
+      {/* Queues panel */}
+      {queues.length > 0 && (
+        <div className="mb-6 space-y-3" data-testid="agent-queues">
+          {queues.map((q) => (
+            <div key={q.id} className="border border-border bg-card rounded-sm overflow-hidden" data-testid={`agent-queue-${q.id}`}>
+              <div className="px-5 py-3 border-b border-border flex items-center justify-between gap-4 flex-wrap">
+                <div>
+                  <div className="text-[10px] uppercase tracking-widest text-muted-foreground font-medium">Fila</div>
+                  <div className="font-display font-semibold text-base flex items-center gap-2">
+                    <Users size={14} className="text-muted-foreground" />
+                    <span>{q.name}</span>
+                    {q.extension && <span className="font-mono text-xs text-muted-foreground">·  {q.extension}</span>}
+                  </div>
+                </div>
+                <div className="flex items-center gap-4 text-xs">
+                  <div className="flex items-center gap-1.5" title="Chamadas aguardando atendimento">
+                    <PhoneIncoming size={14} className={q.waiting > 0 ? "text-amber-600" : "text-muted-foreground"} />
+                    <span className="font-mono text-base font-bold">{q.waiting}</span>
+                    <span className="text-muted-foreground">na fila</span>
+                  </div>
+                  <div className="flex items-center gap-1.5" title="Agentes logados (online + pausa)">
+                    <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                    <span className="font-mono text-base font-bold">{q.logged_in}</span>
+                    <span className="text-muted-foreground">logados</span>
+                  </div>
+                  <div className="text-[11px] text-muted-foreground">
+                    <span className="text-emerald-700 font-medium">{q.online}</span> disp · <span className="text-amber-700 font-medium">{q.paused}</span> pausa · <span className="text-zinc-500 font-medium">{q.offline}</span> off
+                  </div>
+                </div>
+              </div>
+              <ul className="divide-y divide-border">
+                {q.agents.map((p) => (
+                  <li key={p.id} className={`px-5 py-2.5 flex items-center gap-3 ${p.is_me ? "bg-zinc-50" : ""}`} data-testid={`agent-peer-${p.id}`}>
+                    {p.avatar
+                      ? <img src={p.avatar} alt="" className="w-7 h-7 rounded-full" />
+                      : <div className="w-7 h-7 rounded-full bg-zinc-200 flex items-center justify-center text-[11px] font-medium">{p.name?.[0] || "?"}</div>}
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-medium truncate">{p.name}{p.is_me && <span className="text-[10px] text-muted-foreground ml-2">(você)</span>}</div>
+                      <div className="text-[11px] text-muted-foreground font-mono">Ramal {p.extension || "—"}</div>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className={`w-2 h-2 rounded-full ${DOT[p.status] || DOT.offline}`} />
+                      <span className="text-[11px] uppercase tracking-widest text-muted-foreground">
+                        {p.status === "online" ? "Disp." : p.status === "paused" ? "Pausa" : "Off"}
+                      </span>
+                    </div>
+                  </li>
+                ))}
+                {q.agents.length === 0 && (
+                  <li className="px-5 py-3 text-xs text-muted-foreground">Nenhum agente nesta fila.</li>
+                )}
+              </ul>
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="border border-border bg-card rounded-sm overflow-hidden">
         <div className="px-5 py-4 border-b border-border">

@@ -1361,6 +1361,72 @@ async def set_my_extension(body: ExtensionReq, user: dict = Depends(get_current_
             "pbx_synced": pbx_synced, "pbx_error": pbx_error}
 
 
+@api.get("/agents/me/queue-status")
+async def my_queue_status(user: dict = Depends(get_current_user)):
+    """For the agent dashboard: returns the agent's queues with
+    per-queue counts of logged-in agents (online/paused) and
+    waiting calls in queue (from FreeSWITCH ESL when available)."""
+    if user.get("role") != "agent":
+        raise HTTPException(status_code=403, detail="Apenas agentes")
+    aid = user.get("agent_id")
+    if not aid:
+        raise HTTPException(status_code=404, detail="Agente não vinculado")
+    tid = user.get("tenant_id")
+    me = await db.agents.find_one({"id": aid, "tenant_id": tid}, {"_id": 0})
+    if not me:
+        raise HTTPException(status_code=404, detail="Agente não encontrado")
+    my_queue_ids = me.get("queues") or []
+    if not my_queue_ids:
+        return {"queues": []}
+    queues_db = await db.queues.find(
+        {"tenant_id": tid, "id": {"$in": my_queue_ids}}, {"_id": 0}).to_list(50)
+    # Find peers per queue (agents that share at least one of my_queue_ids)
+    peers = await db.agents.find(
+        {"tenant_id": tid, "queues": {"$in": my_queue_ids}},
+        {"_id": 0, "id": 1, "name": 1, "avatar": 1, "extension": 1, "status": 1, "queues": 1}
+    ).to_list(500)
+    # Live waiting count per queue extension via ESL (best-effort)
+    waiting_by_qext: Dict[str, int] = {}
+    s = await db.fusionpbx_settings.find_one({"tenant_id": tid}) or {}
+    if s.get("enabled") and s.get("esl_host"):
+        try:
+            esl = FreeSwitchESL(
+                host=s["esl_host"], port=int(s.get("esl_port") or 8021),
+                password=s.get("esl_password") or "ClueCon",
+                timeout=float(s.get("esl_timeout") or 5.0),
+            )
+            rows = await esl.show_channels()
+            if rows:
+                ext_to_qext = {q.get("extension"): q.get("extension")
+                               for q in queues_db if q.get("extension")}
+                for r in rows:
+                    dest = str(r.get("dest") or "")
+                    if dest in ext_to_qext and (r.get("callstate") or "").upper() != "ACTIVE":
+                        waiting_by_qext[dest] = waiting_by_qext.get(dest, 0) + 1
+        except Exception as e:
+            logger.warning("my_queue_status ESL falhou: %s", e)
+    out = []
+    for q in queues_db:
+        peers_in_q = [p for p in peers if q["id"] in (p.get("queues") or [])]
+        agents_summary = [{
+            "id": p["id"], "name": p.get("name"), "avatar": p.get("avatar"),
+            "extension": p.get("extension"), "status": p.get("status") or "offline",
+            "is_me": p["id"] == aid,
+        } for p in peers_in_q]
+        # local counts
+        online = sum(1 for p in agents_summary if p["status"] == "online")
+        paused = sum(1 for p in agents_summary if p["status"] == "paused")
+        offline = sum(1 for p in agents_summary if p["status"] == "offline")
+        out.append({
+            "id": q["id"], "name": q.get("name"), "extension": q.get("extension"),
+            "agents": agents_summary,
+            "online": online, "paused": paused, "offline": offline,
+            "logged_in": online + paused,
+            "waiting": waiting_by_qext.get(q.get("extension") or "", 0),
+        })
+    return {"queues": out, "fetched_at": datetime.now(timezone.utc).isoformat()}
+
+
 @api.get("/queues")
 async def list_queues(user: dict = Depends(require_permission("queues.view"))):
     f = tenant_filter(user)
