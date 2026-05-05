@@ -463,20 +463,41 @@ class FusionPBXDBClient:
             await conn.close()
 
     async def update_agent_status(self, agent_uuid: str, status: str) -> None:
-        """Update agent_status in v_call_center_agents (Available / On Break / Logged Out)."""
+        """Update agent status in v_call_center_agents.
+        Different FusionPBX versions use different column names: agent_status / state / status."""
         if not self.domain_uuid:
             raise FusionPBXDBError("domain_uuid obrigatório")
         conn = await self._connect()
         try:
+            col_rows = await conn.fetch(
+                """SELECT column_name FROM information_schema.columns
+                   WHERE table_name = 'v_call_center_agents'"""
+            )
+            cols = {r["column_name"] for r in col_rows}
+            # Pick the existing status column (priority order)
+            target_col = None
+            for c in ("agent_status", "status", "state", "agent_state"):
+                if c in cols:
+                    target_col = c
+                    break
+            if not target_col:
+                raise FusionPBXDBError(
+                    "Tabela v_call_center_agents não tem coluna de status conhecida "
+                    f"(colunas: {sorted(cols)}). Atualize só localmente."
+                )
             await conn.execute(
-                """UPDATE v_call_center_agents
-                   SET agent_status = $1
-                   WHERE call_center_agent_uuid = $2::uuid
-                     AND domain_uuid = $3::uuid""",
+                f"""UPDATE v_call_center_agents
+                    SET {target_col} = $1
+                    WHERE call_center_agent_uuid = $2::uuid
+                      AND domain_uuid = $3::uuid""",
                 status, agent_uuid, self.domain_uuid,
             )
+        except FusionPBXDBError:
+            raise
         except Exception as e:
-            raise FusionPBXDBError(f"Falha update_agent_status [{type(e).__name__}]: {e}") from e
+            raise FusionPBXDBError(
+                f"Falha update_agent_status [{type(e).__name__}]: {e}"
+            ) from e
         finally:
             await conn.close()
 

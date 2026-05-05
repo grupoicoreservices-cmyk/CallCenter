@@ -29,7 +29,7 @@ export default function AgentDashboard() {
       toast.error(formatApiError(e.response?.data?.detail) || "Falha ao carregar perfil");
     } finally { setLoading(false); }
   }
-  useEffect(() => { load(); const t = setInterval(load, 15000); return () => clearInterval(t); /* eslint-disable-next-line */ }, []);
+  useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); /* eslint-disable-next-line */ }, []);
 
   async function changeStatus(newStatus) {
     if (!agent) return;
