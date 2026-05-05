@@ -78,7 +78,7 @@ export default function LoginShell({ mode = "agent" }) {
   if (user && typeof user === "object") {
     if (allowedRoles.includes(user.role)) {
       const target = user.role === "super_admin" ? "/tenants"
-                   : user.role === "agent" ? "/agent" : "/";
+                   : user.role === "agent" ? "/agent/select-queues" : "/";
       return <Navigate to={target} replace />;
     }
     return <WrongRolePanel currentRole={user.role} mode={mode} onLogout={logout} />;
@@ -122,7 +122,7 @@ export default function LoginShell({ mode = "agent" }) {
     }
     setLoading(false);
     if (r.role === "super_admin") navigate("/tenants");
-    else if (r.role === "agent") navigate("/agent");
+    else if (r.role === "agent") navigate("/agent/select-queues");
     else navigate("/");
   }
 

@@ -9,6 +9,7 @@ import LoginAgent from "./pages/LoginAgent";
 import LoginMaster from "./pages/LoginMaster";
 import LoginAdmin from "./pages/LoginAdmin";
 import AgentDashboard from "./pages/AgentDashboard";
+import AgentQueueSelect from "./pages/AgentQueueSelect";
 import Dashboard from "./pages/Dashboard";
 import Realtime from "./pages/Realtime";
 import Recordings from "./pages/Recordings";
@@ -42,6 +43,7 @@ function App() {
             <Route path="/admin" element={<LoginAdmin />} />
             <Route path="/" element={<ProtectedRoute hint="master"><Dashboard /></ProtectedRoute>} />
             <Route path="/agent" element={<ProtectedRoute><AgentDashboard /></ProtectedRoute>} />
+            <Route path="/agent/select-queues" element={<ProtectedRoute><AgentQueueSelect /></ProtectedRoute>} />
             <Route path="/realtime" element={<ProtectedRoute><Realtime /></ProtectedRoute>} />
             <Route path="/recordings" element={<ProtectedRoute><Recordings /></ProtectedRoute>} />
             <Route path="/reports" element={<ProtectedRoute hint="master"><Reports /></ProtectedRoute>} />

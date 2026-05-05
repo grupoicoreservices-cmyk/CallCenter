@@ -1461,6 +1461,62 @@ async def set_my_extension(body: ExtensionReq, user: dict = Depends(get_current_
             "pbx_synced": pbx_synced, "pbx_error": pbx_error}
 
 
+@api.get("/agents/me/queues")
+async def my_available_queues(user: dict = Depends(get_current_user)):
+    """Return queues the agent has access to (via tier membership) plus
+    which ones are currently 'active' (selected by the agent at login)."""
+    if user.get("role") != "agent":
+        raise HTTPException(status_code=403, detail="Apenas agentes")
+    aid = user.get("agent_id")
+    if not aid:
+        raise HTTPException(status_code=404, detail="Agente não vinculado")
+    tid = user.get("tenant_id")
+    me = await db.agents.find_one({"id": aid, "tenant_id": tid}, {"_id": 0})
+    if not me:
+        raise HTTPException(status_code=404, detail="Agente não encontrado")
+    qids = me.get("queues") or []
+    if not qids:
+        return {"queues": [], "active_queues": []}
+    queues = await db.queues.find(
+        {"tenant_id": tid, "id": {"$in": qids}}, {"_id": 0}).to_list(50)
+    active = me.get("active_queues") or []
+    out = [{
+        "id": q["id"], "name": q.get("name"), "extension": q.get("extension"),
+        "strategy": q.get("strategy"), "waiting": q.get("waiting", 0),
+        "active": q["id"] in active,
+    } for q in queues]
+    return {"queues": out, "active_queues": active}
+
+
+class QueueSelectionReq(BaseModel):
+    queue_ids: List[str]
+
+@api.post("/agents/me/queues/select")
+async def select_my_queues(body: QueueSelectionReq, user: dict = Depends(get_current_user)):
+    """Agent chooses in which of their assigned queues they want to receive calls."""
+    if user.get("role") != "agent":
+        raise HTTPException(status_code=403, detail="Apenas agentes")
+    aid = user.get("agent_id")
+    if not aid:
+        raise HTTPException(status_code=404, detail="Agente não vinculado")
+    tid = user.get("tenant_id")
+    me = await db.agents.find_one({"id": aid, "tenant_id": tid}, {"_id": 0})
+    if not me:
+        raise HTTPException(status_code=404, detail="Agente não encontrado")
+    allowed = set(me.get("queues") or [])
+    chosen = [qid for qid in (body.queue_ids or []) if qid in allowed]
+    if not chosen:
+        raise HTTPException(status_code=400, detail="Selecione ao menos uma fila autorizada")
+    await db.agents.update_one(
+        {"id": aid},
+        {"$set": {"active_queues": chosen,
+                  "active_queues_changed_at": datetime.now(timezone.utc).isoformat()}})
+    await write_audit(user, "update", "agent_queues", aid,
+                       f"{me.get('name')} ativou {len(chosen)} fila(s)",
+                       {"active_queues": chosen})
+    return {"ok": True, "active_queues": chosen}
+
+
 @api.get("/agents/me/queue-status")
 async def my_queue_status(user: dict = Depends(get_current_user)):
     """For the agent dashboard: returns the agent's queues with
@@ -1476,6 +1532,10 @@ async def my_queue_status(user: dict = Depends(get_current_user)):
     if not me:
         raise HTTPException(status_code=404, detail="Agente não encontrado")
     my_queue_ids = me.get("queues") or []
+    # Filter by active_queues if agent has selected (login-time pick).
+    active_queues = me.get("active_queues") or []
+    if active_queues:
+        my_queue_ids = [q for q in my_queue_ids if q in active_queues]
     if not my_queue_ids:
         return {"queues": []}
     queues_db = await db.queues.find(

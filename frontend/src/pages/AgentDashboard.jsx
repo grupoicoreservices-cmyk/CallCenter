@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { Headphones, Pause, LogOut as LogOutIcon, Loader2, Phone, Award, Clock, TrendingUp, Users, PhoneIncoming } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { Headphones, Pause, LogOut as LogOutIcon, Loader2, Phone, Award, Clock, TrendingUp, Users, PhoneIncoming, ListChecks } from "lucide-react";
 import { api, fmtDuration, formatApiError } from "../lib/api";
 import { useAuth } from "../contexts/AuthContext";
 import { Button } from "../components/ui/button";
@@ -20,6 +21,7 @@ const DOT = {
 
 export default function AgentDashboard() {
   const { user, logout } = useAuth();
+  const navigate = useNavigate();
   const [agent, setAgent] = useState(null);
   const [calls, setCalls] = useState([]);
   const [queues, setQueues] = useState([]);
@@ -128,6 +130,13 @@ export default function AgentDashboard() {
       {/* Queues panel */}
       {queues.length > 0 && (
         <div className="mb-6 space-y-3" data-testid="agent-queues">
+          <div className="flex items-center justify-between mb-1">
+            <div className="text-[10px] uppercase tracking-widest text-muted-foreground font-medium">Filas ativas nesta sessão</div>
+            <Button variant="ghost" size="sm" onClick={() => navigate("/agent/select-queues")}
+              data-testid="agent-change-queues">
+              <ListChecks size={13} className="mr-1.5" /> Trocar filas
+            </Button>
+          </div>
           {queues.map((q) => (
             <div key={q.id} className="border border-border bg-card rounded-sm overflow-hidden" data-testid={`agent-queue-${q.id}`}>
               <div className="px-5 py-3 border-b border-border flex items-center justify-between gap-4 flex-wrap">
