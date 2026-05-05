@@ -39,29 +39,39 @@
 - **install.sh**: Monolithic Ubuntu installer (Node20, Python3.11, MongoDB7, Nginx+SSL).
 - 33 backend tests (97% pass rate).
 
+### Phase 4 (2026-04 → 2026-05) — Production Deepening
+- **FusionPBX via PostgreSQL** (asyncpg) and **FreeSWITCH ESL** (raw asyncio socket) for accurate real-time data.
+- **Dedicated login routes**: `/login` (agent), `/master` (admin/supervisor), `/admin` (super admin) with auto domain extraction.
+- **Agent Portal `/agent`**: status toggle (Available/Break/Logout) synced to FusionPBX.
+- **Advanced Reports**: SLA targets, agent-state log, heatmap, comparative KPIs.
+- **SFTP recording streaming** (asyncssh) with HTTP Range support → custom in-app audio player + download.
+- **JWT via query string** for native browser tags (`<audio>`, `<a download>`) since they cannot send Authorization headers.
+- **Site Branding (Super Admin)** [2026-05-05]: `/branding` page lets root customize login wallpaper, logo, favicon (auto-applied to `<head>`), brand name/subtitle, login title/description, footer text and release version. Backend exposes public `GET /api/branding/site`, super-admin-only `PUT /api/branding/site` and generic `POST /api/uploads/asset?kind=logo|wallpaper|favicon`. Static files served by FastAPI at `/uploads/*`.
+
 ## Prioritized Backlog (P0/P1/P2)
 
 ### P0
 - (none currently)
 
 ### P1
-- Refactor `server.py` (1737 lines) into routers (auth, billing, fusionpbx, webhooks)
+- Refactor `server.py` (3500+ lines) into routers (auth, billing, fusionpbx, webhooks, branding)
+- Onda 2 — Página Executiva (Top 10 números, taxa de conversão, KPIs estratégicos)
+- Onda 4 — Relatórios agendados por email
 - PayPal webhook signature verification (PAYPAL-TRANSMISSION-SIG)
-- Encrypt secrets at rest (Asaas key, FusionPBX password) instead of plaintext
-- Background scheduler for periodic FusionPBX sync (using sync_interval_minutes)
-- WebSocket-based realtime instead of polling
-- AI analysis (Whisper + GPT) for recordings
+- Encrypt secrets at rest (Asaas key, FusionPBX password, SFTP password) instead of plaintext
 
 ### P2
 - Supervisão silenciosa (spy/whisper/barge) via ESL
 - Gravação de tela dos agentes
 - CSAT via SMS/URA pós-atendimento
 - Subscription model (recurring billing on Asaas)
+- AI analysis (Whisper + GPT) for recordings
 
 ## Files of Reference
-- `/app/backend/server.py` — Main API (1737 lines, plan to refactor)
-- `/app/backend/integrations/{asaas,paypal,fusionpbx}.py` — 3rd-party clients
-- `/app/frontend/src/pages/{Charges,FusionPBXSettings,Tenants,Plans,BillingSettings}.jsx`
+- `/app/backend/server.py` — Main API (3500+ lines, plan to refactor)
+- `/app/backend/integrations/{asaas,paypal,fusionpbx,fusionpbx_db,freeswitch_esl,fusionpbx_sftp}.py`
+- `/app/frontend/src/pages/{LoginShell,SiteBranding,Charges,FusionPBXSettings,Tenants,Plans,BillingSettings,AgentDashboard,Recordings}.jsx`
+- `/app/frontend/src/components/BrandingLoader.jsx` — applies favicon/title globally
 - `/app/install.sh` — Self-hosting installer
 
 ## Test Credentials

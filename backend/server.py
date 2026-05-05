@@ -516,6 +516,95 @@ async def upload_logo(file: UploadFile = File(...), user: dict = Depends(require
     # URL served via /uploads/<filename>
     return {"url": f"/uploads/{filename}", "filename": filename, "size": path.stat().st_size}
 
+
+@api.post("/uploads/asset")
+async def upload_asset(file: UploadFile = File(...), kind: str = "logo",
+                        user: dict = Depends(require_super_admin())):
+    """Generic asset upload (logo / wallpaper / favicon).
+    `kind` is informational only; storage is the same.
+    """
+    allowed = {
+        "logo":      {"png", "jpg", "jpeg", "webp", "svg", "gif"},
+        "wallpaper": {"png", "jpg", "jpeg", "webp", "gif"},
+        "favicon":   {"png", "ico", "svg"},
+    }.get(kind, {"png", "jpg", "jpeg", "webp", "svg", "gif", "ico"})
+    ext = (file.filename or "").rsplit(".", 1)[-1].lower()
+    if ext not in allowed:
+        raise HTTPException(status_code=400,
+            detail=f"Formato inválido para {kind}. Use: {', '.join(sorted(allowed))}")
+    # Light size cap: 8MB for wallpapers, 2MB for logo/favicon
+    max_bytes = 8 * 1024 * 1024 if kind == "wallpaper" else 2 * 1024 * 1024
+    filename = f"{kind}-{uuid.uuid4()}.{ext}"
+    path = UPLOAD_DIR / filename
+    written = 0
+    with path.open("wb") as f:
+        while True:
+            chunk = await file.read(64 * 1024)
+            if not chunk:
+                break
+            written += len(chunk)
+            if written > max_bytes:
+                f.close()
+                path.unlink(missing_ok=True)
+                raise HTTPException(status_code=413,
+                    detail=f"Arquivo maior que {max_bytes // (1024*1024)} MB")
+            f.write(chunk)
+    return {"url": f"/uploads/{filename}", "filename": filename, "size": written, "kind": kind}
+
+
+# ---------- Site Branding (global, super admin) ----------
+class SiteBranding(BaseModel):
+    brand_name: Optional[str] = None
+    brand_subtitle: Optional[str] = None
+    login_title: Optional[str] = None
+    login_subtitle: Optional[str] = None
+    logo_url: Optional[str] = None
+    wallpaper_url: Optional[str] = None
+    favicon_url: Optional[str] = None
+    footer_text: Optional[str] = None
+    release_version: Optional[str] = None
+    accent_color: Optional[str] = None
+
+
+def _site_branding_defaults() -> dict:
+    return {
+        "id": "global",
+        "brand_name": "Voxyra CCA",
+        "brand_subtitle": "Callcenter Analytical",
+        "login_title": "",
+        "login_subtitle": "",
+        "logo_url": "",
+        "wallpaper_url": "",
+        "favicon_url": "",
+        "footer_text": "",
+        "release_version": "",
+        "accent_color": "#09090b",
+    }
+
+
+@api.get("/branding/site")
+async def get_site_branding():
+    """Public: returns global site branding for login pages and document head."""
+    doc = await db.site_branding.find_one({"id": "global"}, {"_id": 0})
+    if not doc:
+        doc = _site_branding_defaults()
+    return doc
+
+
+@api.put("/branding/site")
+async def update_site_branding(body: SiteBranding,
+                                user: dict = Depends(require_super_admin())):
+    payload = {k: v for k, v in body.dict().items() if v is not None}
+    base = await db.site_branding.find_one({"id": "global"}, {"_id": 0}) or _site_branding_defaults()
+    base.update(payload)
+    base["id"] = "global"
+    base["updated_at"] = datetime.now(timezone.utc).isoformat()
+    await db.site_branding.update_one({"id": "global"}, {"$set": base}, upsert=True)
+    await write_audit(user, "update", "site_branding", "global", "Branding global", payload)
+    out = {**base}
+    out.pop("_id", None)
+    return out
+
 # ---------- Billing settings (placeholder for Asaas/PayPal credentials) ----------
 class BillingSettings(BaseModel):
     asaas_api_key: Optional[str] = None
@@ -3572,6 +3661,8 @@ async def on_shutdown():
     client.close()
 
 app.include_router(api)
+# Serve uploaded assets (logos, wallpapers, favicons) at /uploads/<filename>
+app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True, allow_origin_regex=".*",

@@ -19,6 +19,7 @@ export default function LoginShell({ mode = "agent" }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [branding, setBranding] = useState(null);
+  const [site, setSite] = useState(null);
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -27,6 +28,34 @@ export default function LoginShell({ mode = "agent" }) {
     mode === "agent" ? ["agent"]
     : mode === "master" ? ["admin", "supervisor"]
     : ["super_admin"];
+
+  // Site-wide branding (super-admin customization)
+  useEffect(() => {
+    api.get("/branding/site").then((r) => setSite(r.data)).catch(() => {});
+    const onUpd = (e) => setSite(e.detail);
+    window.addEventListener("voxyra:branding-updated", onUpd);
+    return () => window.removeEventListener("voxyra:branding-updated", onUpd);
+  }, []);
+
+  // Apply favicon + document title from site branding
+  useEffect(() => {
+    if (!site) return;
+    const title = site.brand_name
+      ? `${site.brand_name}${site.brand_subtitle ? " · " + site.brand_subtitle : ""}`
+      : "Voxyra CCA";
+    document.title = title;
+    if (site.favicon_url) {
+      let link = document.querySelector("link[rel~='icon']");
+      if (!link) {
+        link = document.createElement("link");
+        link.rel = "icon";
+        document.head.appendChild(link);
+      }
+      const u = site.favicon_url.startsWith("http") ? site.favicon_url
+              : (process.env.REACT_APP_BACKEND_URL || "") + site.favicon_url;
+      link.href = u;
+    }
+  }, [site]);
 
   // Branding: extrai domínio do email digitado
   useEffect(() => {
@@ -75,36 +104,60 @@ export default function LoginShell({ mode = "agent" }) {
 
   const meta = MODE_META[mode];
   const Icon = meta.icon;
-  const accent = isAdmin ? "#09090b" : (branding?.accent_color || meta.accent);
+  const accent = isAdmin ? (site?.accent_color || "#09090b") : (branding?.accent_color || meta.accent);
+  const heroTitle = (!branding && site?.login_title) || meta.heroTitle;
+  const heroDesc  = (!branding && site?.login_subtitle) || meta.heroDesc;
+  const brandName = branding?.name || site?.brand_name || "Voxyra CCA";
+  const brandLogo = branding?.logo_url || site?.logo_url || "";
+  const wallpaperUrl = !branding && site?.wallpaper_url
+    ? (site.wallpaper_url.startsWith("http") ? site.wallpaper_url
+       : (process.env.REACT_APP_BACKEND_URL || "") + site.wallpaper_url)
+    : "";
+  const footerText = site?.footer_text || `© ${new Date().getFullYear()} ${site?.brand_name || "Voxyra CCA"}`;
+  const release = site?.release_version || "";
 
   return (
     <div className="min-h-screen grid md:grid-cols-2 bg-background">
       {/* Painel esquerdo */}
-      <div className="hidden md:flex bg-[hsl(var(--sidebar))] text-zinc-100 p-12 flex-col justify-between">
-        <div className="flex items-center gap-3">
+      <div
+        className="hidden md:flex bg-[hsl(var(--sidebar))] text-zinc-100 p-12 flex-col justify-between relative overflow-hidden"
+        style={wallpaperUrl ? {
+          backgroundImage: `linear-gradient(rgba(9,9,11,0.72), rgba(9,9,11,0.85)), url("${wallpaperUrl}")`,
+          backgroundSize: "cover",
+          backgroundPosition: "center",
+        } : undefined}
+      >
+        <div className="flex items-center gap-3 relative z-10">
           <div className="w-10 h-10 bg-white text-black rounded-sm flex items-center justify-center"
-               style={{ background: branding?.logo_url ? "transparent" : "white" }}>
-            {branding?.logo_url
-              ? <img src={branding.logo_url} alt="" className="w-10 h-10 object-contain" />
+               style={{ background: brandLogo ? "transparent" : "white" }}>
+            {brandLogo
+              ? <img src={brandLogo.startsWith("http") ? brandLogo : (process.env.REACT_APP_BACKEND_URL || "") + brandLogo} alt="" className="w-10 h-10 object-contain" />
               : <Headphones size={20} strokeWidth={2.2} />}
           </div>
           <div>
-            <div className="font-display font-bold text-xl">{branding?.name || "Voxyra CCA"}</div>
+            <div className="font-display font-bold text-xl">{brandName}</div>
             <div className="text-[11px] text-zinc-400 uppercase tracking-widest">{meta.subtitle}</div>
           </div>
         </div>
-        <div>
+        <div className="relative z-10">
           <div className="inline-flex items-center gap-2 mb-4 px-3 py-1 rounded-full text-[11px] uppercase tracking-widest"
                style={{ background: meta.accent + "33", color: meta.accent }}>
             <Icon size={12} /> {meta.label}
           </div>
           <h2 className="font-display text-4xl font-bold tracking-tight leading-tight">
-            {meta.heroTitle}
+            {heroTitle}
           </h2>
-          <p className="text-zinc-400 mt-4 text-sm max-w-sm">{meta.heroDesc}</p>
+          <p className="text-zinc-400 mt-4 text-sm max-w-sm">{heroDesc}</p>
         </div>
-        <div className="text-[11px] text-zinc-500 flex items-center justify-between">
-          <span>© {new Date().getFullYear()} Voxyra CCA</span>
+        <div className="text-[11px] text-zinc-500 flex items-center justify-between gap-4 relative z-10" data-testid="login-footer">
+          <span className="truncate">
+            {footerText}
+            {release && (
+              <span className="ml-2 px-1.5 py-0.5 rounded bg-white/10 text-zinc-300 font-mono text-[10px]" data-testid="login-release">
+                {release}
+              </span>
+            )}
+          </span>
           <PortalLinks current={mode} />
         </div>
       </div>
