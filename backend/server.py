@@ -773,7 +773,7 @@ async def list_audit_logs(
 # ---------- Helpers / Constants ----------
 DISPOSITION_LABELS = {"answered": "Atendida", "missed": "Perdida", "abandoned": "Abandonada", "voicemail": "Correio de Voz"}
 DIRECTION_LABELS = {"inbound": "Entrada", "outbound": "Saída"}
-ABANDON_LABELS = {"agent_loss": "Perda de Agente", "queue_abandon": "Cliente na Fila"}
+ABANDON_LABELS = {"agent_loss": "Abandono do Agente", "queue_abandon": "Cliente na Fila"}
 SAMPLE_AUDIO = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3"
 STATUSES = ["online", "incall", "paused", "offline"]
 CALL_DIR = ["inbound", "outbound"]

@@ -27,7 +27,7 @@ function AbandonedSummary({ totals, periodLabel }) {
     <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
       <div className="border border-border rounded-sm p-4 bg-zinc-50/50">
         <div className="flex items-center gap-2 text-[10px] text-muted-foreground uppercase tracking-widest font-medium">
-          <UserX size={12} className="text-red-500" /> Perda de Agente
+          <UserX size={12} className="text-red-500" /> Abandono do Agente
         </div>
         <div className="font-mono text-3xl font-medium mt-2 text-red-600" data-testid="abandoned-agent-loss">{totals.agent_loss}</div>
         <div className="text-[10px] text-muted-foreground mt-1">agente não atendeu · {periodLabel}</div>
@@ -58,7 +58,7 @@ function AbandonedChart({ data, xKey }) {
           <YAxis stroke="#a1a1aa" fontSize={11} allowDecimals={false} />
           <Tooltip contentStyle={{ fontSize: 12, borderRadius: 4 }} />
           <Legend iconSize={8} wrapperStyle={{ fontSize: 11 }} />
-          <Bar dataKey="agent_loss" name="Perda de Agente" stackId="a" fill="#ef4444" radius={[0, 0, 0, 0]} />
+          <Bar dataKey="agent_loss" name="Abandono do Agente" stackId="a" fill="#ef4444" radius={[0, 0, 0, 0]} />
           <Bar dataKey="queue_abandon" name="Cliente na Fila" stackId="a" fill="#f59e0b" radius={[2, 2, 0, 0]} />
         </BarChart>
       </ResponsiveContainer>
@@ -153,7 +153,7 @@ export default function Dashboard() {
                 <div className="flex gap-5 text-xs">
                   <div className="flex items-center gap-2">
                     <span className="w-2.5 h-2.5 rounded-sm bg-red-500" />
-                    <span className="text-muted-foreground">Perda de Agente</span>
+                    <span className="text-muted-foreground">Abandono do Agente</span>
                   </div>
                   <div className="flex items-center gap-2">
                     <span className="w-2.5 h-2.5 rounded-sm bg-amber-500" />
@@ -201,7 +201,7 @@ export default function Dashboard() {
                             <div className="flex-1 flex h-5 rounded-sm overflow-hidden bg-zinc-100 border border-border">
                               {q.agent_loss > 0 && (
                                 <div className="bg-red-500 flex items-center justify-center text-[10px] font-mono text-white px-1"
-                                  style={{ width: `${agentPct}%` }} title={`Perda de agente: ${q.agent_loss}`}>
+                                  style={{ width: `${agentPct}%` }} title={`Abandono do agente: ${q.agent_loss}`}>
                                   {q.agent_loss}
                                 </div>
                               )}
