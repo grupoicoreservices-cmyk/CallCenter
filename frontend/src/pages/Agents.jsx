@@ -6,7 +6,7 @@ import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Button } from "../components/ui/button";
 import { Switch } from "../components/ui/switch";
-import { Search, Plus, Trash2, Loader2, Copy, KeyRound } from "lucide-react";
+import { Search, Plus, Trash2, Loader2, Copy, KeyRound, Pencil } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "../components/ui/dialog";
 import { toast } from "sonner";
 import { useAuth } from "../contexts/AuthContext";
@@ -21,6 +21,7 @@ export default function Agents() {
   const [queues, setQueues] = useState([]);
   const [search, setSearch] = useState("");
   const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState(null); // agent being edited
   const [saving, setSaving] = useState(false);
   const [credentials, setCredentials] = useState(null); // último resultado da criação
   const [form, setForm] = useState({
@@ -41,6 +42,7 @@ export default function Agents() {
   useEffect(() => { load(); /* eslint-disable-next-line */ }, []);
 
   function openNew() {
+    setEditing(null);
     setForm({
       name: "", extension: "", agent_id: "", voxyra_email: "", voxyra_password: "",
       sip_password: "", pbx_password: "", queue_uuids: [],
@@ -50,21 +52,68 @@ export default function Agents() {
     setOpen(true);
   }
 
-  async function handleCreate(e) {
+  async function openEdit(agent) {
+    setEditing(agent);
+    setCredentials(null);
+    // Fetch related Voxyra user (if any) to prefill email
+    let voxyraEmail = "";
+    try {
+      const { data } = await api.get(`/agents/${agent.id}/linked-user`);
+      voxyraEmail = data?.email || "";
+    } catch (_) { /* ignore */ }
+    // Map agent.queues -> external_ids
+    const queue_uuids = (agent.queues || [])
+      .map((qid) => queues.find((q) => q.id === qid)?.external_id)
+      .filter(Boolean);
+    setForm({
+      name: agent.name || "",
+      extension: agent.extension || "",
+      agent_id: "",
+      voxyra_email: voxyraEmail,
+      voxyra_password: "",
+      sip_password: "",
+      pbx_password: "",
+      queue_uuids,
+      create_pbx_user: false,
+      create_voxyra_user: false,
+    });
+    setOpen(true);
+  }
+
+  async function handleSubmit(e) {
     e?.preventDefault();
     if (!form.name || !form.extension) { toast.error("Nome e ramal são obrigatórios"); return; }
     setSaving(true);
     try {
-      const payload = { ...form };
-      // remove empty optional fields para backend gerar
-      ["agent_id", "voxyra_email", "voxyra_password", "sip_password", "pbx_password"].forEach(k => {
-        if (!payload[k]) delete payload[k];
-      });
-      const { data } = await api.post(`/fusionpbx/provision/agent${qs}`, payload);
-      toast.success(`Agente "${form.name}" criado com sucesso`);
-      setCredentials(data); // mostra senhas geradas
-      load();
-    } catch (e) { toast.error(formatApiError(e.response?.data?.detail) || "Erro ao criar"); }
+      if (editing) {
+        // Edit mode
+        const payload = {
+          name: form.name,
+          extension: form.extension,
+          queue_uuids: form.queue_uuids,
+        };
+        if (form.voxyra_email) payload.voxyra_email = form.voxyra_email;
+        if (form.voxyra_password) payload.voxyra_password = form.voxyra_password;
+        if (form.sip_password) payload.sip_password = form.sip_password;
+        const { data } = await api.put(`/agents/${editing.id}${qs}`, payload);
+        toast.success(`Agente "${form.name}" atualizado`);
+        if (data.warnings && data.warnings.length > 0) {
+          data.warnings.forEach((w) => toast.warning(w));
+        }
+        setOpen(false);
+        load();
+      } else {
+        // Create mode (legacy)
+        const payload = { ...form };
+        ["agent_id", "voxyra_email", "voxyra_password", "sip_password", "pbx_password"].forEach(k => {
+          if (!payload[k]) delete payload[k];
+        });
+        const { data } = await api.post(`/fusionpbx/provision/agent${qs}`, payload);
+        toast.success(`Agente "${form.name}" criado com sucesso`);
+        setCredentials(data);
+        load();
+      }
+    } catch (e) { toast.error(formatApiError(e.response?.data?.detail) || "Erro ao salvar"); }
     finally { setSaving(false); }
   }
 
@@ -111,6 +160,11 @@ export default function Agents() {
               </div>
               <div className="flex items-center gap-2">
                 <StatusBadge status={a.status} />
+                {canEdit && (
+                  <button onClick={() => openEdit(a)} className="text-zinc-500 hover:text-foreground p-1" title="Editar" data-testid={`agent-edit-${a.id}`}>
+                    <Pencil size={14} />
+                  </button>
+                )}
                 {canEdit && a.external_id && (
                   <button onClick={() => handleDelete(a)} className="text-red-500 hover:text-red-700 p-1" title="Excluir" data-testid={`agent-delete-${a.id}`}>
                     <Trash2 size={14} />
@@ -136,7 +190,7 @@ export default function Agents() {
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>{credentials ? "✅ Agente criado" : "Novo agente"}</DialogTitle>
+            <DialogTitle>{credentials ? "✅ Agente criado" : (editing ? `Editar: ${editing.name}` : "Novo agente")}</DialogTitle>
           </DialogHeader>
 
           {credentials ? (
@@ -166,7 +220,7 @@ export default function Agents() {
               </DialogFooter>
             </div>
           ) : (
-            <form onSubmit={handleCreate} className="space-y-3">
+            <form onSubmit={handleSubmit} className="space-y-3">
               <div className="grid grid-cols-2 gap-3">
                 <div><Label>Nome completo *</Label>
                   <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })}
@@ -175,26 +229,37 @@ export default function Agents() {
                   <Input value={form.extension} onChange={(e) => setForm({ ...form, extension: e.target.value })}
                          placeholder="1001" type="number" data-testid="agent-form-ext" required /></div>
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div><Label>Login do agente <span className="text-[10px] text-muted-foreground">(default = ramal)</span></Label>
-                  <Input value={form.agent_id} onChange={(e) => setForm({ ...form, agent_id: e.target.value })}
-                         placeholder="1001 ou joao" data-testid="agent-form-agentid" /></div>
-                <div><Label>Email Voxyra <span className="text-[10px] text-muted-foreground">(opcional)</span></Label>
+              {!editing && (
+                <div className="grid grid-cols-2 gap-3">
+                  <div><Label>Login do agente <span className="text-[10px] text-muted-foreground">(default = ramal)</span></Label>
+                    <Input value={form.agent_id} onChange={(e) => setForm({ ...form, agent_id: e.target.value })}
+                           placeholder="1001 ou joao" data-testid="agent-form-agentid" /></div>
+                  <div><Label>Email Voxyra <span className="text-[10px] text-muted-foreground">(opcional)</span></Label>
+                    <Input value={form.voxyra_email} onChange={(e) => setForm({ ...form, voxyra_email: e.target.value })}
+                           placeholder="auto-gerado" data-testid="agent-form-email" /></div>
+                </div>
+              )}
+              {editing && (
+                <div><Label>Email Voxyra</Label>
                   <Input value={form.voxyra_email} onChange={(e) => setForm({ ...form, voxyra_email: e.target.value })}
-                         placeholder="auto-gerado" data-testid="agent-form-email" /></div>
-              </div>
+                         placeholder="email@dominio" type="email" data-testid="agent-form-email" /></div>
+              )}
               <div className="border border-border bg-zinc-50 rounded p-3 space-y-2">
-                <div className="text-xs font-medium flex items-center gap-1.5"><KeyRound size={12} /> Senhas (deixe vazio para gerar)</div>
-                <div className="grid grid-cols-3 gap-2">
+                <div className="text-xs font-medium flex items-center gap-1.5"><KeyRound size={12} />
+                  {editing ? "Trocar senhas (deixe vazio para manter)" : "Senhas (deixe vazio para gerar)"}
+                </div>
+                <div className={`grid ${editing ? "grid-cols-2" : "grid-cols-3"} gap-2`}>
                   <div><Label className="text-[11px]">SIP</Label>
                     <Input value={form.sip_password} onChange={(e) => setForm({ ...form, sip_password: e.target.value })}
-                           type="password" placeholder="auto" /></div>
-                  <div><Label className="text-[11px]">PBX web</Label>
-                    <Input value={form.pbx_password} onChange={(e) => setForm({ ...form, pbx_password: e.target.value })}
-                           type="password" placeholder="auto" /></div>
+                           type="password" placeholder={editing ? "manter" : "auto"} /></div>
+                  {!editing && (
+                    <div><Label className="text-[11px]">PBX web</Label>
+                      <Input value={form.pbx_password} onChange={(e) => setForm({ ...form, pbx_password: e.target.value })}
+                             type="password" placeholder="auto" /></div>
+                  )}
                   <div><Label className="text-[11px]">Voxyra</Label>
                     <Input value={form.voxyra_password} onChange={(e) => setForm({ ...form, voxyra_password: e.target.value })}
-                           type="password" placeholder="auto" /></div>
+                           type="password" placeholder={editing ? "manter" : "auto"} /></div>
                 </div>
               </div>
               <div>
@@ -220,23 +285,25 @@ export default function Agents() {
                   ))}
                 </div>
               </div>
-              <div className="flex items-center gap-6 text-sm">
-                <label className="flex items-center gap-2">
-                  <Switch checked={form.create_pbx_user}
-                          onCheckedChange={(v) => setForm({ ...form, create_pbx_user: v })} />
-                  Criar usuário PBX (login web do FusionPBX)
-                </label>
-                <label className="flex items-center gap-2">
-                  <Switch checked={form.create_voxyra_user}
-                          onCheckedChange={(v) => setForm({ ...form, create_voxyra_user: v })} />
-                  Criar usuário Voxyra
-                </label>
-              </div>
+              {!editing && (
+                <div className="flex items-center gap-6 text-sm">
+                  <label className="flex items-center gap-2">
+                    <Switch checked={form.create_pbx_user}
+                            onCheckedChange={(v) => setForm({ ...form, create_pbx_user: v })} />
+                    Criar usuário PBX (login web do FusionPBX)
+                  </label>
+                  <label className="flex items-center gap-2">
+                    <Switch checked={form.create_voxyra_user}
+                            onCheckedChange={(v) => setForm({ ...form, create_voxyra_user: v })} />
+                    Criar usuário Voxyra
+                  </label>
+                </div>
+              )}
               <DialogFooter className="pt-3">
                 <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancelar</Button>
                 <Button type="submit" disabled={saving} data-testid="agent-form-submit">
                   {saving && <Loader2 size={14} className="mr-1.5 animate-spin" />}
-                  Criar e sincronizar
+                  {editing ? "Salvar alterações" : "Criar e sincronizar"}
                 </Button>
               </DialogFooter>
             </form>

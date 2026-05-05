@@ -1345,6 +1345,140 @@ class AgentStatusReq(BaseModel):
     status: str  # "online" | "paused" | "offline"
 
 
+class AgentEditReq(BaseModel):
+    name: Optional[str] = None
+    extension: Optional[str] = None
+    voxyra_email: Optional[str] = None
+    voxyra_password: Optional[str] = None
+    sip_password: Optional[str] = None
+    queue_uuids: Optional[List[str]] = None  # external_ids
+
+
+@api.get("/agents/{agent_id}/linked-user")
+async def get_agent_linked_user(agent_id: str,
+                                  user: dict = Depends(require_permission("agents.manage"))):
+    f = tenant_filter(user)
+    agent = await db.agents.find_one({"id": agent_id, **f}, {"_id": 0, "id": 1, "tenant_id": 1})
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agente não encontrado")
+    u = await db.users.find_one(
+        {"agent_id": agent_id, "tenant_id": agent["tenant_id"]},
+        {"_id": 0, "id": 1, "email": 1, "name": 1, "active": 1})
+    if not u:
+        return {"email": None}
+    return u
+
+
+@api.put("/agents/{agent_id}")
+async def update_agent(agent_id: str, body: AgentEditReq,
+                       user: dict = Depends(require_permission("agents.manage"))):
+    f = tenant_filter(user)
+    agent = await db.agents.find_one({"id": agent_id, **f}, {"_id": 0})
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agente não encontrado")
+    tid = agent.get("tenant_id")
+    update: Dict[str, Any] = {}
+    changes: Dict[str, Any] = {}
+    pbx_warnings: List[str] = []
+
+    if body.name is not None and body.name.strip() and body.name != agent.get("name"):
+        update["name"] = body.name.strip()
+        changes["name"] = {"from": agent.get("name"), "to": body.name.strip()}
+
+    new_ext = (body.extension or "").strip()
+    if new_ext and new_ext != (agent.get("extension") or ""):
+        if not new_ext.isdigit() or not (2 <= len(new_ext) <= 8):
+            raise HTTPException(status_code=400, detail="Ramal inválido")
+        # Garante ramal único no tenant
+        dup = await db.agents.find_one(
+            {"tenant_id": tid, "extension": new_ext, "id": {"$ne": agent_id}})
+        if dup:
+            raise HTTPException(status_code=400, detail=f"Ramal {new_ext} já está em uso")
+        update["extension"] = new_ext
+        changes["extension"] = {"from": agent.get("extension"), "to": new_ext}
+
+    s = await db.fusionpbx_settings.find_one({"tenant_id": tid}) or {}
+    pbx_db_ok = (s.get("connection_type") == "db" and s.get("db_host") and agent.get("external_id"))
+    client = None
+    if pbx_db_ok:
+        try:
+            client = FusionPBXDBClient(
+                host=s["db_host"], port=int(s.get("db_port") or 5432),
+                database=s.get("db_name") or "fusionpbx",
+                username=s["db_username"], password=s.get("db_password") or "",
+                domain_uuid=s.get("domain_uuid"), ssl=bool(s.get("db_ssl")),
+            )
+        except Exception as e:
+            pbx_warnings.append(f"PBX init: {e}")
+
+    # Voxyra user (linked to this agent)
+    voxyra_user_doc = await db.users.find_one({"agent_id": agent_id, "tenant_id": tid})
+    if body.voxyra_email and voxyra_user_doc and body.voxyra_email != voxyra_user_doc.get("email"):
+        new_email = validate_email_str(body.voxyra_email)
+        clash = await db.users.find_one({"email": new_email, "id": {"$ne": voxyra_user_doc["id"]}})
+        if clash:
+            raise HTTPException(status_code=400, detail="Email já está em uso por outro usuário")
+        await db.users.update_one({"id": voxyra_user_doc["id"]}, {"$set": {"email": new_email}})
+        changes["voxyra_email"] = {"from": voxyra_user_doc.get("email"), "to": new_email}
+
+    if body.voxyra_password:
+        if voxyra_user_doc:
+            if len(body.voxyra_password) < 6:
+                raise HTTPException(status_code=400, detail="Senha Voxyra mínima 6 caracteres")
+            await db.users.update_one(
+                {"id": voxyra_user_doc["id"]},
+                {"$set": {"password_hash": hash_password(body.voxyra_password)}})
+            changes["voxyra_password"] = "changed"
+        else:
+            pbx_warnings.append("Não há usuário Voxyra vinculado para alterar senha")
+
+    # SIP password (FusionPBX extension)
+    if body.sip_password and pbx_db_ok and client:
+        if len(body.sip_password) < 4:
+            raise HTTPException(status_code=400, detail="Senha SIP mínima 4 caracteres")
+        try:
+            await client.update_extension_password(
+                domain_uuid=s.get("domain_uuid"),
+                extension=agent.get("extension"),
+                new_password=body.sip_password,
+            )
+            changes["sip_password"] = "changed"
+        except Exception as e:
+            pbx_warnings.append(f"SIP password: {e}")
+
+    # Queue tiers (set of external_ids)
+    if body.queue_uuids is not None and pbx_db_ok and client:
+        # Map current queues (mongo) -> external_ids
+        cur_queue_docs = await db.queues.find(
+            {"tenant_id": tid, "id": {"$in": agent.get("queues") or []}}, {"_id": 0}).to_list(50)
+        current_external = {q.get("external_id") for q in cur_queue_docs if q.get("external_id")}
+        desired_external = set(body.queue_uuids)
+        to_add = desired_external - current_external
+        to_remove = current_external - desired_external
+        for qu in to_add:
+            try: await client.assign_agent_to_queue(agent["external_id"], qu)
+            except Exception as e: pbx_warnings.append(f"add tier {qu[:8]}: {e}")
+        for qu in to_remove:
+            try: await client.remove_agent_from_queue(agent["external_id"], qu)
+            except Exception as e: pbx_warnings.append(f"remove tier {qu[:8]}: {e}")
+        # Update local mapping
+        new_queue_ids = []
+        if desired_external:
+            new_queues = await db.queues.find(
+                {"tenant_id": tid, "external_id": {"$in": list(desired_external)}}, {"_id": 0, "id": 1}).to_list(50)
+            new_queue_ids = [q["id"] for q in new_queues]
+        update["queues"] = new_queue_ids
+        changes["queues"] = {"count": len(new_queue_ids)}
+
+    if update:
+        await db.agents.update_one({"id": agent_id}, {"$set": update})
+    if changes:
+        await write_audit(user, "update", "agent", agent_id,
+                           f"Edição de {agent.get('name')}", changes)
+    fresh = await db.agents.find_one({"id": agent_id}, {"_id": 0})
+    return {"ok": True, "agent": fresh, "changes": changes, "warnings": pbx_warnings}
+
+
 @api.put("/agents/{agent_id}/status")
 async def set_agent_status(agent_id: str, body: AgentStatusReq,
                            user: dict = Depends(get_current_user)):

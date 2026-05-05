@@ -299,6 +299,25 @@ class FusionPBXDBClient:
         finally:
             await conn.close()
 
+    async def update_extension_password(self, domain_uuid: str, extension: str,
+                                        new_password: str) -> bool:
+        """Update the SIP password of an extension."""
+        if not domain_uuid:
+            raise FusionPBXDBError("domain_uuid obrigatório")
+        conn = await self._connect()
+        try:
+            res = await conn.execute(
+                """UPDATE v_extensions
+                   SET password = $1
+                   WHERE domain_uuid = $2::uuid AND extension = $3""",
+                new_password, domain_uuid, str(extension),
+            )
+            return "1" in res.split()[-1] if res.split() else False
+        except Exception as e:
+            raise FusionPBXDBError(f"Falha update_extension_password [{type(e).__name__}]: {e}") from e
+        finally:
+            await conn.close()
+
     async def provision_user(self, username: str, password_hash: str,
                              contact: str = "") -> Dict[str, Any]:
         """Cria um usuário (login) no FusionPBX (v_users).
