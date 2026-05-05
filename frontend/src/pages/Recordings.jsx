@@ -10,7 +10,7 @@ import {
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || "";
 
-function fullUrl(u) {
+function fullUrl(u, opts = {}) {
   if (!u) return "";
   if (u.startsWith("http") || u.startsWith("blob:") || u.startsWith("data:")) return u;
   // Attach JWT as ?token=... so native <audio>/<a download> requests authenticate
@@ -19,7 +19,9 @@ function fullUrl(u) {
   let url = BACKEND_URL + u;
   if (u.startsWith("/api/recordings/") && u.includes("/stream")) {
     const t = localStorage.getItem("token");
-    if (t) url += (u.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(t);
+    const sep = () => (url.includes("?") ? "&" : "?");
+    if (t) url += sep() + "token=" + encodeURIComponent(t);
+    if (opts.download) url += sep() + "download=1";
   }
   return url;
 }
@@ -158,7 +160,7 @@ export default function Recordings() {
                 </td>
                 <td className="px-3 py-3 text-right">
                   {r.streamable ? (
-                    <a href={fullUrl(r.audio_url)} download className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground" data-testid={`rec-download-${r.id}`}>
+                    <a href={fullUrl(r.audio_url, { download: true })} download className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground" data-testid={`rec-download-${r.id}`}>
                       <Download size={14} />
                     </a>
                   ) : null}

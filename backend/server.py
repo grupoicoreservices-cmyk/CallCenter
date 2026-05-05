@@ -2643,6 +2643,30 @@ async def stream_recording_endpoint(recording_id: str, request: Request,
     elif lower.endswith(".wav"): ctype = "audio/wav"
     elif lower.endswith(".ogg"): ctype = "audio/ogg"
     else: ctype = "application/octet-stream"
+    ext = lower.rsplit(".", 1)[-1] if "." in lower else "mp3"
+
+    # Friendly download filename: <agente>_<YYYY-MM-DD_HHMM>_<numero>.<ext>
+    def _slug(v: str, maxlen: int = 40) -> str:
+        v = (v or "").strip()
+        # keep only safe chars; replace spaces and accents
+        import re as _re
+        import unicodedata as _ud
+        v = _ud.normalize("NFKD", v).encode("ascii", "ignore").decode("ascii")
+        v = _re.sub(r"[^A-Za-z0-9._-]+", "-", v).strip("-_.")
+        return (v[:maxlen] or "rec")
+    started = rec.get("started_at") or ""
+    ts_part = ""
+    if started:
+        ts_part = started.replace("T", "_").replace(":", "")[:15]  # YYYY-MM-DD_HHMMSS
+    parts = [
+        _slug(rec.get("agent_name") or "agente", 30),
+        ts_part or _slug(recording_id[:8], 10),
+        _slug(rec.get("caller_number") or "", 20),
+    ]
+    download_name = "_".join(p for p in parts if p) + f".{ext}"
+    # ?download=1 force attachment so browser saves with the friendly filename
+    is_download = (request.query_params.get("download") in ("1", "true", "yes"))
+    disposition = ("attachment" if is_download else "inline") + f'; filename="{download_name}"'
 
     # Range header
     range_header = request.headers.get("range") or request.headers.get("Range")
@@ -2652,6 +2676,7 @@ async def stream_recording_endpoint(recording_id: str, request: Request,
         "Accept-Ranges": "bytes",
         "Content-Type": ctype,
         "Cache-Control": "private, max-age=3600",
+        "Content-Disposition": disposition,
     }
     if range_header and total:
         try:
