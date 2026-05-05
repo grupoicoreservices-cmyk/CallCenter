@@ -471,9 +471,23 @@ sudo systemctl restart postgresql`}</pre>
                 <Label className="text-[11px]">Senha SSH {meta.sftp_password_set && <span className="text-[10px] text-emerald-600 ml-1">✓</span>}</Label>
                 <Input type="password" value={form.sftp_password}
                        onChange={(e) => setForm({ ...form, sftp_password: e.target.value })}
-                       placeholder={meta.sftp_password_set ? "(deixe vazio para manter)" : "senha da conta SSH"}
+                       placeholder={meta.sftp_password_set ? "(deixe vazio para manter)" : "ou use chave abaixo"}
                        data-testid="fpbx-sftp-password" />
               </div>
+            </div>
+            <div>
+              <Label className="text-[11px]">
+                Chave SSH privada {meta.sftp_key_set && <span className="text-[10px] text-emerald-600 ml-1">✓ configurada</span>}
+                <span className="text-muted-foreground ml-1 normal-case">(alternativa à senha · mais seguro)</span>
+              </Label>
+              <textarea
+                value={form.sftp_private_key}
+                onChange={(e) => setForm({ ...form, sftp_private_key: e.target.value })}
+                placeholder={meta.sftp_key_set ? "(deixe vazio para manter chave salva)" : "-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----"}
+                rows={4}
+                className="w-full font-mono text-[11px] border border-border rounded-sm px-3 py-2 bg-white focus:outline-none focus:ring-1 focus:ring-foreground"
+                data-testid="fpbx-sftp-key"
+              />
             </div>
             <div>
               <Label className="text-[11px]">Path das gravações <span className="text-muted-foreground">(opcional · auto-detecta se vazio)</span></Label>
