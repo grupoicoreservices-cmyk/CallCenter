@@ -49,6 +49,22 @@ export default function Queues() {
     } catch (e) { toast.error(formatApiError(e.response?.data?.detail) || "Erro ao remover"); }
   }
 
+  async function handleSetSla(q) {
+    const current = q.sla_target_sec || 20;
+    const v = window.prompt(
+      `Meta de SLA para "${q.name}" (segundos para atender):\nDefault da indústria: 20s (80% das chamadas).`,
+      String(current),
+    );
+    if (!v) return;
+    const n = parseInt(v);
+    if (isNaN(n) || n < 1 || n > 600) { toast.error("Informe entre 1 e 600 segundos"); return; }
+    try {
+      await api.put(`/queues/${q.id}/sla${qs}`, { sla_target_sec: n });
+      toast.success(`Meta SLA "${q.name}" definida em ${n}s`);
+      load();
+    } catch (e) { toast.error(formatApiError(e.response?.data?.detail) || "Erro"); }
+  }
+
   return (
     <Layout title="Filas de Atendimento" subtitle="Monitoramento e configuração de filas do PBX">
       {canEdit && (
@@ -69,10 +85,21 @@ export default function Queues() {
                 <div className="text-xs text-muted-foreground mt-1">Estratégia: <span className="font-mono">{q.strategy}</span></div>
               </div>
               <div className="flex items-center gap-2">
+                <div className="flex items-center gap-1.5 bg-zinc-50 border border-border px-2 py-1 rounded-sm" title={`Meta SLA: ${q.sla_target_sec || 20}s`}>
+                  <span className="text-[10px] text-muted-foreground uppercase tracking-widest">SLA</span>
+                  <span className="font-mono text-xs">{q.sla_target_sec || 20}s</span>
+                </div>
                 <div className="flex items-center gap-1.5 bg-zinc-50 border border-border px-2 py-1 rounded-sm">
                   <Users size={12} className="text-muted-foreground" />
                   <span className="font-mono text-xs">{q.agent_count || 0}</span>
                 </div>
+                {canEdit && (
+                  <button onClick={() => handleSetSla(q)}
+                          className="text-blue-600 hover:text-blue-800 p-1"
+                          title="Definir meta de SLA" data-testid={`queue-sla-${q.id}`}>
+                    <Clock size={14} />
+                  </button>
+                )}
                 {canEdit && q.external_id && (
                   <button onClick={() => handleDelete(q)}
                           className="text-red-500 hover:text-red-700 p-1"

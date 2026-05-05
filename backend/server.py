@@ -1149,15 +1149,32 @@ async def _build_report(user: dict, report_type: str, period: str, agent_id: Opt
             base = {"agent_id": a["id"], "started_at": {"$gte": cutoff}, **f}
             answered = await db.calls.count_documents({**base, "disposition": "answered"})
             missed = await db.calls.count_documents({**base, "disposition": {"$in": ["missed", "abandoned"]}})
+            # Percentiles for handle time
+            durations = await db.calls.find(
+                {**base, "disposition": "answered", "duration_sec": {"$gt": 0}},
+                {"_id": 0, "duration_sec": 1}
+            ).to_list(5000)
+            ds = sorted([d["duration_sec"] for d in durations]) if durations else []
+            avg_h = int(sum(ds) / len(ds)) if ds else 0
+            median = ds[len(ds)//2] if ds else 0
+            p95 = ds[min(len(ds)-1, int(len(ds)*0.95))] if ds else 0
+            mx = ds[-1] if ds else 0
             rows.append({"agent_name": a["name"], "extension": a["extension"], "status": a.get("status"),
                          "answered": answered, "missed": missed,
-                         "avg_handle_sec": a.get("avg_handle_sec", 0),
+                         "avg_handle_sec": avg_h,
+                         "median_handle_sec": median,
+                         "p95_handle_sec": p95,
+                         "max_handle_sec": mx,
                          "csat": a.get("csat", 0), "adherence_pct": a.get("adherence_pct", 0)})
         rows.sort(key=lambda r: r["answered"], reverse=True)
         return {"title": "Performance de Agentes", "columns": [
             {"key": "agent_name", "label": "Agente"}, {"key": "extension", "label": "Ramal"},
             {"key": "status", "label": "Status"}, {"key": "answered", "label": "Atendidas"},
-            {"key": "missed", "label": "Perdidas"}, {"key": "avg_handle_sec", "label": "TMA (s)"},
+            {"key": "missed", "label": "Perdidas"},
+            {"key": "avg_handle_sec", "label": "TMA (s)"},
+            {"key": "median_handle_sec", "label": "Mediana (s)"},
+            {"key": "p95_handle_sec", "label": "P95 (s)"},
+            {"key": "max_handle_sec", "label": "Máx (s)"},
             {"key": "csat", "label": "CSAT"}, {"key": "adherence_pct", "label": "Aderência %"},
         ], "rows": rows}
     if report_type == "queues":
@@ -1242,6 +1259,199 @@ async def _build_report(user: dict, report_type: str, period: str, agent_id: Opt
             {"key": "hour", "label": "Hora"}, {"key": "answered", "label": "Atendidas"},
             {"key": "missed", "label": "Perdidas"}, {"key": "total", "label": "Total"},
         ], "rows": [buckets[h] for h in range(24)]}
+    if report_type == "sla":
+        queues = await db.queues.find(f, {"_id": 0}).to_list(500)
+        if queue_id: queues = [q for q in queues if q["id"] == queue_id]
+        rows = []
+        for q in queues:
+            target = int(q.get("sla_target_sec") or 20)
+            base = {"queue_id": q["id"], "started_at": {"$gte": cutoff}, **f}
+            answered_total = await db.calls.count_documents({**base, "disposition": "answered"})
+            answered_within = await db.calls.count_documents({
+                **base, "disposition": "answered", "wait_sec": {"$lte": target}
+            })
+            missed = await db.calls.count_documents({**base, "disposition": {"$in": ["missed", "abandoned"]}})
+            offered = answered_total + missed
+            sla = round((answered_within / answered_total) * 100, 1) if answered_total else 0.0
+            asa_docs = await db.calls.find({**base, "disposition": "answered"},
+                                            {"_id": 0, "wait_sec": 1}).to_list(5000)
+            asa = int(sum(d.get("wait_sec", 0) for d in asa_docs) / max(len(asa_docs), 1)) if asa_docs else 0
+            color = "green" if sla >= 80 else ("amber" if sla >= 60 else "red")
+            rows.append({
+                "queue_name": q["name"], "extension": q["extension"],
+                "target_sec": target, "offered": offered,
+                "answered": answered_total, "answered_within": answered_within,
+                "missed": missed, "sla_pct": sla, "asa_sec": asa, "color": color,
+            })
+        rows.sort(key=lambda r: r["sla_pct"])
+        return {"title": "SLA por Fila", "columns": [
+            {"key": "queue_name", "label": "Fila"}, {"key": "extension", "label": "Ext."},
+            {"key": "target_sec", "label": "Meta (s)"},
+            {"key": "offered", "label": "Ofertadas"},
+            {"key": "answered", "label": "Atendidas"},
+            {"key": "answered_within", "label": "Dentro Meta"},
+            {"key": "missed", "label": "Perdidas"},
+            {"key": "sla_pct", "label": "SLA %"},
+            {"key": "asa_sec", "label": "ASA (s)"},
+        ], "rows": rows}
+
+    if report_type == "agent_states":
+        # Reads v_call_center_agent_status_log from FusionPBX (PostgreSQL mode)
+        tid = tenant_scope(user)
+        rows = []
+        if tid:
+            s = await db.fusionpbx_settings.find_one({"tenant_id": tid})
+            if s and (s.get("connection_type") == "db") and s.get("db_host"):
+                client = FusionPBXDBClient(
+                    host=s["db_host"], port=int(s.get("db_port") or 5432),
+                    database=s.get("db_name") or "fusionpbx",
+                    username=s["db_username"], password=s.get("db_password") or "",
+                    domain_uuid=s.get("domain_uuid"), ssl=bool(s.get("db_ssl")),
+                )
+                try:
+                    conn = await client._connect()
+                    try:
+                        tbl = await conn.fetchval(
+                            "SELECT to_regclass('public.v_call_center_agent_status_log')::text")
+                        if tbl:
+                            sql = """
+                                SELECT a.agent_name, a.agent_id,
+                                       l.value AS state, l.start_epoch, l.stop_epoch
+                                FROM v_call_center_agent_status_log l
+                                LEFT JOIN v_call_center_agents a
+                                  ON a.call_center_agent_uuid = l.call_center_agent_uuid
+                                WHERE a.domain_uuid = $1::uuid
+                                  AND l.start_epoch >= EXTRACT(EPOCH FROM $2::timestamptz)
+                                ORDER BY l.start_epoch DESC LIMIT 5000
+                            """
+                            recs = await conn.fetch(sql, client.domain_uuid, cutoff)
+                            # Aggregate per agent + state
+                            agg: Dict[str, Dict[str, int]] = {}
+                            for r in recs:
+                                ag = r["agent_name"] or r["agent_id"] or "—"
+                                state = (r["state"] or "Available").strip()
+                                start = int(r["start_epoch"] or 0)
+                                stop = int(r["stop_epoch"] or 0) or int(time.time())
+                                dur = max(0, stop - start)
+                                if ag not in agg: agg[ag] = {}
+                                agg[ag][state] = agg[ag].get(state, 0) + dur
+                            for ag, states in agg.items():
+                                total = sum(states.values()) or 1
+                                rows.append({
+                                    "agent_name": ag,
+                                    "logged_in_sec": total,
+                                    "available_sec": states.get("Available", 0),
+                                    "on_break_sec": states.get("On Break", 0),
+                                    "logged_out_sec": states.get("Logged Out", 0),
+                                    "available_pct": round((states.get("Available", 0) / total) * 100, 1),
+                                })
+                    finally:
+                        await conn.close()
+                except FusionPBXDBError as e:
+                    logger.warning("agent_states: %s", e)
+        rows.sort(key=lambda r: r["available_pct"], reverse=True)
+        return {"title": "Estados de Agente", "columns": [
+            {"key": "agent_name", "label": "Agente"},
+            {"key": "logged_in_sec", "label": "Tempo logado (s)"},
+            {"key": "available_sec", "label": "Disponível (s)"},
+            {"key": "on_break_sec", "label": "Em pausa (s)"},
+            {"key": "logged_out_sec", "label": "Deslogado (s)"},
+            {"key": "available_pct", "label": "% Disponível"},
+        ], "rows": rows}
+
+    if report_type == "heatmap":
+        q = {**f, "started_at": {"$gte": cutoff}}
+        if agent_id: q["agent_id"] = agent_id
+        if queue_id: q["queue_id"] = queue_id
+        docs = await db.calls.find(q, {"_id": 0, "started_at": 1, "disposition": 1}).to_list(20000)
+        # 7 (dia da semana) × 24 (hora)
+        grid = [[0 for _ in range(24)] for _ in range(7)]
+        days = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"]
+        max_v = 0
+        for d in docs:
+            try:
+                dt = datetime.fromisoformat(d["started_at"])
+                wd = dt.weekday()
+                h = dt.hour
+                grid[wd][h] += 1
+                if grid[wd][h] > max_v: max_v = grid[wd][h]
+            except Exception: pass
+        rows = []
+        for wd in range(7):
+            row = {"day": days[wd]}
+            for h in range(24):
+                row[f"h{h:02d}"] = grid[wd][h]
+            rows.append(row)
+        cols = [{"key": "day", "label": "Dia"}]
+        for h in range(24):
+            cols.append({"key": f"h{h:02d}", "label": f"{h:02d}h"})
+        return {"title": "Heatmap (Dia × Hora)", "columns": cols, "rows": rows,
+                "max_value": max_v}
+
+    if report_type == "compare":
+        # Comparativo período atual vs período anterior
+        now = datetime.now(timezone.utc)
+        if period == "today":
+            cur_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            prev_start = cur_start - timedelta(days=1)
+            prev_end = cur_start
+        elif period == "30d":
+            cur_start = now - timedelta(days=30)
+            prev_start = cur_start - timedelta(days=30)
+            prev_end = cur_start
+        else:  # 7d default
+            cur_start = now - timedelta(days=7)
+            prev_start = cur_start - timedelta(days=7)
+            prev_end = cur_start
+
+        async def _stats(start: datetime, end: Optional[datetime] = None):
+            q = {**f, "started_at": {"$gte": start.isoformat()}}
+            if end is not None:
+                q["started_at"]["$lt"] = end.isoformat()
+            answered = await db.calls.count_documents({**q, "disposition": "answered"})
+            missed = await db.calls.count_documents({**q, "disposition": {"$in": ["missed", "abandoned"]}})
+            recs = await db.calls.find({**q, "disposition": "answered"},
+                                        {"_id": 0, "duration_sec": 1, "wait_sec": 1}).to_list(20000)
+            durs = [r.get("duration_sec", 0) for r in recs]
+            waits = [r.get("wait_sec", 0) for r in recs]
+            avg_h = int(sum(durs) / len(durs)) if durs else 0
+            avg_w = int(sum(waits) / len(waits)) if waits else 0
+            return {"answered": answered, "missed": missed,
+                    "total": answered + missed,
+                    "avg_handle_sec": avg_h, "avg_wait_sec": avg_w}
+
+        cur = await _stats(cur_start)
+        prev = await _stats(prev_start, prev_end)
+
+        def _delta(a, b):
+            if not b: return 100.0 if a else 0.0
+            return round(((a - b) / b) * 100, 1)
+
+        rows = [
+            {"metric": "Atendidas", "current": cur["answered"], "previous": prev["answered"],
+             "delta_pct": _delta(cur["answered"], prev["answered"]),
+             "trend": "up" if cur["answered"] >= prev["answered"] else "down"},
+            {"metric": "Perdidas", "current": cur["missed"], "previous": prev["missed"],
+             "delta_pct": _delta(cur["missed"], prev["missed"]),
+             "trend": "down" if cur["missed"] >= prev["missed"] else "up"},  # less is better
+            {"metric": "Total", "current": cur["total"], "previous": prev["total"],
+             "delta_pct": _delta(cur["total"], prev["total"]),
+             "trend": "up" if cur["total"] >= prev["total"] else "down"},
+            {"metric": "TMA (s)", "current": cur["avg_handle_sec"], "previous": prev["avg_handle_sec"],
+             "delta_pct": _delta(cur["avg_handle_sec"], prev["avg_handle_sec"]),
+             "trend": "down" if cur["avg_handle_sec"] >= prev["avg_handle_sec"] else "up"},
+            {"metric": "TME (s)", "current": cur["avg_wait_sec"], "previous": prev["avg_wait_sec"],
+             "delta_pct": _delta(cur["avg_wait_sec"], prev["avg_wait_sec"]),
+             "trend": "down" if cur["avg_wait_sec"] >= prev["avg_wait_sec"] else "up"},
+        ]
+        return {"title": "Comparativo de Períodos", "columns": [
+            {"key": "metric", "label": "Métrica"},
+            {"key": "current", "label": "Atual"},
+            {"key": "previous", "label": "Anterior"},
+            {"key": "delta_pct", "label": "Variação %"},
+            {"key": "trend", "label": "Tendência"},
+        ], "rows": rows}
+
     raise HTTPException(status_code=400, detail="Tipo de relatório inválido")
 
 @api.get("/reports/agents")
@@ -1270,7 +1480,28 @@ async def reports_types(user: dict = Depends(require_permission("reports.view"))
         {"key": "abandoned", "label": "Chamadas Abandonadas"},
         {"key": "recordings", "label": "Gravações"},
         {"key": "hourly", "label": "Produtividade Horária"},
+        {"key": "sla", "label": "SLA por Fila"},
+        {"key": "agent_states", "label": "Estados de Agente"},
+        {"key": "heatmap", "label": "Heatmap (Dia × Hora)"},
+        {"key": "compare", "label": "Comparativo de Períodos"},
     ]}
+
+
+class QueueSlaTarget(BaseModel):
+    sla_target_sec: int = 20
+
+
+@api.put("/queues/{queue_id}/sla")
+async def update_queue_sla(queue_id: str, body: QueueSlaTarget,
+                           user: dict = Depends(require_permission("queues.manage"))):
+    f = tenant_filter(user)
+    res = await db.queues.update_one({"id": queue_id, **f},
+                                     {"$set": {"sla_target_sec": int(body.sla_target_sec)}})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Fila não encontrada")
+    await write_audit(user, "update", "queue", queue_id, "SLA target",
+                      {"sla_target_sec": body.sla_target_sec})
+    return {"ok": True, "sla_target_sec": body.sla_target_sec}
 
 @api.get("/reports/data")
 async def reports_data(type: str, period: str = "7d", agent_id: Optional[str] = None, queue_id: Optional[str] = None,

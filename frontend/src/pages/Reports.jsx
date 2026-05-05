@@ -21,10 +21,14 @@ const PERIODS = [
 const TYPES = [
   { key: "agents", label: "Performance" },
   { key: "queues", label: "Filas" },
+  { key: "sla", label: "SLA" },
   { key: "calls", label: "Histórico (CDR)" },
   { key: "abandoned", label: "Abandonos" },
   { key: "recordings", label: "Gravações" },
   { key: "hourly", label: "Produtividade" },
+  { key: "agent_states", label: "Estados Agente" },
+  { key: "heatmap", label: "Heatmap" },
+  { key: "compare", label: "Comparativo" },
 ];
 
 export default function Reports() {
@@ -162,6 +166,75 @@ export default function Reports() {
                   </div>
                 )}
 
+                {/* Visualização especial por tipo */}
+                {report.title === "Heatmap (Dia × Hora)" && (
+                  <div className="border border-border bg-card rounded-sm p-4 mb-4">
+                    <div className="text-[10px] text-muted-foreground uppercase tracking-widest font-medium mb-2">Heatmap · {report.rows.reduce((a, r) => a + Object.keys(r).filter(k => k !== "day").reduce((s, k) => s + r[k], 0), 0)} chamadas</div>
+                    <div className="overflow-x-auto">
+                      <table className="text-[10px] font-mono">
+                        <thead><tr><th className="p-1 sticky left-0 bg-card"></th>
+                          {Array.from({ length: 24 }, (_, h) => <th key={h} className="p-1 text-muted-foreground">{h}h</th>)}
+                        </tr></thead>
+                        <tbody>{report.rows.map((row, i) => (
+                          <tr key={i}>
+                            <td className="p-1 font-medium sticky left-0 bg-card">{row.day}</td>
+                            {Array.from({ length: 24 }, (_, h) => {
+                              const v = row[`h${String(h).padStart(2, "0")}`] || 0;
+                              const intensity = report.max_value ? v / report.max_value : 0;
+                              const bg = v === 0 ? "transparent" : `rgba(16, 185, 129, ${0.15 + intensity * 0.85})`;
+                              return <td key={h} className="p-0">
+                                <div className="w-7 h-7 flex items-center justify-center rounded-sm" style={{ background: bg }}
+                                     title={`${row.day} ${h}h → ${v} chamadas`}>{v || ""}</div>
+                              </td>;
+                            })}
+                          </tr>
+                        ))}</tbody>
+                      </table>
+                    </div>
+                    <div className="text-[10px] text-muted-foreground mt-2">Verde mais escuro = mais chamadas. Use para dimensionar equipe.</div>
+                  </div>
+                )}
+
+                {report.title === "Comparativo de Períodos" && (
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
+                    {report.rows.map((r, i) => (
+                      <div key={i} className="border border-border bg-card rounded-sm p-3">
+                        <div className="text-[10px] text-muted-foreground uppercase tracking-widest font-medium">{r.metric}</div>
+                        <div className="font-mono text-2xl font-bold mt-1">{r.current}</div>
+                        <div className="text-xs text-muted-foreground mt-0.5">vs {r.previous} anterior</div>
+                        <div className={`text-xs font-mono mt-1 ${r.trend === "up" ? "text-emerald-700" : "text-red-600"}`}>
+                          {r.trend === "up" ? "↑" : "↓"} {Math.abs(r.delta_pct)}%
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {report.title === "SLA por Fila" && report.rows.length > 0 && (
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
+                    {report.rows.slice(0, 6).map((r, i) => {
+                      const colorMap = { green: "bg-emerald-500", amber: "bg-amber-500", red: "bg-red-500" };
+                      const bgMap = { green: "bg-emerald-50 border-emerald-200", amber: "bg-amber-50 border-amber-200", red: "bg-red-50 border-red-200" };
+                      return (
+                        <div key={i} className={`border rounded-sm p-3 ${bgMap[r.color] || "border-border bg-card"}`}>
+                          <div className="flex items-center gap-2">
+                            <div className={`w-2 h-2 rounded-full ${colorMap[r.color]}`} />
+                            <div className="text-xs font-medium truncate">{r.queue_name}</div>
+                            <span className="ml-auto text-[10px] text-muted-foreground font-mono">ext {r.extension}</span>
+                          </div>
+                          <div className="mt-2 flex items-baseline gap-2">
+                            <div className="font-mono text-3xl font-bold">{r.sla_pct}%</div>
+                            <div className="text-[10px] text-muted-foreground">meta {r.target_sec}s</div>
+                          </div>
+                          <div className="text-[11px] text-muted-foreground font-mono mt-1">
+                            {r.answered_within} dentro · {r.answered} atendidas · {r.missed} perdidas
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
                 <div className="border border-border bg-card rounded-sm overflow-hidden">
                   <div className="px-5 py-4 border-b border-border flex items-center justify-between">
                     <div>
@@ -223,10 +296,21 @@ function isNumeric(v) {
 function renderCell(key, value) {
   if (value == null || value === "") return "—";
   if (key === "status") return <StatusBadge status={value} />;
-  if (key === "duration_sec" || key === "wait_sec" || key === "avg_handle_sec" || key === "avg_wait_sec") {
+  if (key === "trend") {
+    return value === "up"
+      ? <span className="text-emerald-700">↑ melhor</span>
+      : <span className="text-red-600">↓ pior</span>;
+  }
+  if (key === "color") {
+    const map = { green: "bg-emerald-500", amber: "bg-amber-500", red: "bg-red-500" };
+    return <span className={`inline-block w-2.5 h-2.5 rounded-full ${map[value] || "bg-zinc-300"}`} />;
+  }
+  if (["duration_sec", "wait_sec", "avg_handle_sec", "avg_wait_sec",
+       "median_handle_sec", "p95_handle_sec", "max_handle_sec",
+       "asa_sec", "logged_in_sec", "available_sec", "on_break_sec", "logged_out_sec"].includes(key)) {
     return fmtDuration(value);
   }
-  if (key === "sla_pct" || key === "adherence_pct") return `${value}%`;
+  if (["sla_pct", "adherence_pct", "available_pct", "delta_pct"].includes(key)) return `${value}%`;
   if (key === "csat") {
     return <span className="inline-flex items-center gap-1">★ {value}</span>;
   }
