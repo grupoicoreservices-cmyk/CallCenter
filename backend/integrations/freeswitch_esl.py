@@ -137,6 +137,31 @@ class FreeSwitchESL:
             except Exception:
                 pass
 
+    async def api(self, cmd: str) -> str:
+        """Execute arbitrary `api <cmd>` on FreeSWITCH and return body text."""
+        reader, writer = await self.connect_and_auth()
+        try:
+            resp = await self._send_command(writer, reader, f"api {cmd}")
+            return resp["body"].strip()
+        finally:
+            try:
+                writer.write(b"exit\n\n"); await writer.drain()
+                writer.close()
+            except Exception:
+                pass
+
+    async def callcenter_reload(self) -> str:
+        """Reload callcenter config so mod_callcenter picks up DB changes
+        (agents, tiers, queues). Tries several flavors for compatibility."""
+        # Prefer callcenter_config to refresh the in-memory tables
+        # without affecting live calls.
+        for cmd in ("callcenter_config reload",
+                    "reload mod_callcenter"):
+            out = await self.api(cmd)
+            if out and not out.startswith("-ERR"):
+                return out
+        return "reload failed"
+
 
 def normalize_esl_channel(c: Dict[str, Any]) -> Dict[str, Any]:
     """Map a row from 'show channels as json' to our internal shape."""

@@ -34,6 +34,23 @@ from integrations.freeswitch_esl import (
     FreeSwitchESL, FreeSwitchESLError, normalize_esl_channel,
 )
 
+
+async def _pbx_reload_callcenter(tid: str) -> None:
+    """After changing tiers/agents in DB, tell mod_callcenter to reload so the
+    distributor picks up the changes. Best-effort: silent on failure."""
+    try:
+        s = await db.fusionpbx_settings.find_one({"tenant_id": tid}) or {}
+        if not (s.get("enabled") and s.get("esl_host")):
+            return
+        esl = FreeSwitchESL(
+            host=s["esl_host"], port=int(s.get("esl_port") or 8021),
+            password=s.get("esl_password") or "ClueCon",
+            timeout=float(s.get("esl_timeout") or 5.0),
+        )
+        await esl.callcenter_reload()
+    except Exception as e:
+        logger.warning("callcenter_reload falhou: %s", e)
+
 EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
 
 def validate_email_str(v: str) -> str:
@@ -1601,6 +1618,8 @@ async def set_my_extension(body: ExtensionReq, user: dict = Depends(get_current_
                                 "pbx_status": "Available",
                                 "active_queues": [],  # zera seleção (vai ser feita na próxima tela)
                                 "extension_changed_at": datetime.now(timezone.utc).isoformat()}})
+    if pbx_synced:
+        await _pbx_reload_callcenter(tid)
     await write_audit(user, "update", "agent_extension", aid,
                        f"{agent.get('name')} ramal → {ext}",
                        {"extension": ext, "pbx_synced": pbx_synced})
@@ -1666,6 +1685,8 @@ async def agent_logout(request: Request):
         {"$set": {"status": "offline", "pbx_status": "Logged Out",
                    "active_queues": [],
                    "logout_at": datetime.now(timezone.utc).isoformat()}})
+    if pbx_logged_out or tiers_removed:
+        await _pbx_reload_callcenter(tid)
     await write_audit(user, "logout", "agent", aid,
                        f"{agent.get('name')} desconectou",
                        {"tiers_removed": tiers_removed, "pbx_logged_out": pbx_logged_out})
@@ -1762,6 +1783,8 @@ async def select_my_queues(body: QueueSelectionReq, user: dict = Depends(get_cur
         {"id": aid},
         {"$set": {"active_queues": chosen_ids,
                   "active_queues_changed_at": datetime.now(timezone.utc).isoformat()}})
+    if pbx_added or pbx_removed:
+        await _pbx_reload_callcenter(tid)
     await write_audit(user, "update", "agent_queues", aid,
                        f"{me.get('name')} ativou {len(chosen_ids)} fila(s)",
                        {"active_queues": chosen_ids,
