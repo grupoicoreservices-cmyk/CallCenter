@@ -1580,6 +1580,16 @@ async def set_my_extension(body: ExtensionReq, user: dict = Depends(get_current_
             )
             new_contact = await client.update_agent_contact(
                 agent["external_id"], ext, s.get("domain_name") or "")
+            # Reset login state: deslogar de TODAS as filas (limpa tiers antigos)
+            try:
+                await client.remove_all_tiers_for_agent(agent["external_id"])
+            except Exception as e:
+                logger.warning("remove_all_tiers no login falhou: %s", e)
+            # Marcar agente como Available para começar a receber chamadas
+            try:
+                await client.update_agent_status(agent["external_id"], "Available")
+            except Exception as e:
+                logger.warning("update_agent_status Available falhou: %s", e)
             pbx_synced = True
         except FusionPBXDBError as e:
             pbx_error = str(e)
@@ -1587,6 +1597,9 @@ async def set_my_extension(body: ExtensionReq, user: dict = Depends(get_current_
     await db.agents.update_one(
         {"id": aid}, {"$set": {"extension": ext,
                                 "agent_contact": new_contact,
+                                "status": "online",
+                                "pbx_status": "Available",
+                                "active_queues": [],  # zera seleção (vai ser feita na próxima tela)
                                 "extension_changed_at": datetime.now(timezone.utc).isoformat()}})
     await write_audit(user, "update", "agent_extension", aid,
                        f"{agent.get('name')} ramal → {ext}",

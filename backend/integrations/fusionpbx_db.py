@@ -497,11 +497,38 @@ class FusionPBXDBClient:
                      AND domain_uuid = $3::uuid""",
                 queue_uuid, agent_uuid, self.domain_uuid,
             )
-            # res like 'DELETE 1' or 'DELETE 0'
             return res.endswith("1") or res.split()[-1].isdigit() and int(res.split()[-1]) > 0
         except Exception as e:
             raise FusionPBXDBError(
                 f"Falha remove_agent_from_queue [{type(e).__name__}]: {e}"
+            ) from e
+        finally:
+            await conn.close()
+
+    async def remove_all_tiers_for_agent(self, agent_uuid: str) -> int:
+        """Remove TODOS os tiers (vínculos a filas) do agente. Retorna o número
+        de linhas removidas. Usado no login do agente para deslogar de tudo
+        antes de logar somente nas filas escolhidas."""
+        conn = await self._connect()
+        try:
+            tbl = await conn.fetchval(
+                "SELECT to_regclass('public.v_call_center_tiers')::text"
+            )
+            if not tbl:
+                return 0
+            res = await conn.execute(
+                """DELETE FROM v_call_center_tiers
+                   WHERE call_center_agent_uuid = $1::uuid
+                     AND domain_uuid = $2::uuid""",
+                agent_uuid, self.domain_uuid,
+            )
+            try:
+                return int(res.split()[-1])
+            except Exception:
+                return 0
+        except Exception as e:
+            raise FusionPBXDBError(
+                f"Falha remove_all_tiers_for_agent [{type(e).__name__}]: {e}"
             ) from e
         finally:
             await conn.close()
