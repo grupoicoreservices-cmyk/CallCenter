@@ -1356,7 +1356,7 @@ class AgentEditReq(BaseModel):
 
 @api.get("/agents/{agent_id}/linked-user")
 async def get_agent_linked_user(agent_id: str,
-                                  user: dict = Depends(require_permission("agents.manage"))):
+                                  user: dict = Depends(require_permission("agents.edit"))):
     f = tenant_filter(user)
     agent = await db.agents.find_one({"id": agent_id, **f}, {"_id": 0, "id": 1, "tenant_id": 1})
     if not agent:
@@ -1371,7 +1371,7 @@ async def get_agent_linked_user(agent_id: str,
 
 @api.put("/agents/{agent_id}")
 async def update_agent(agent_id: str, body: AgentEditReq,
-                       user: dict = Depends(require_permission("agents.manage"))):
+                       user: dict = Depends(require_permission("agents.edit"))):
     f = tenant_filter(user)
     agent = await db.agents.find_one({"id": agent_id, **f}, {"_id": 0})
     if not agent:
