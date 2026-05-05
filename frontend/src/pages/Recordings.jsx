@@ -13,7 +13,15 @@ const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || "";
 function fullUrl(u) {
   if (!u) return "";
   if (u.startsWith("http") || u.startsWith("blob:") || u.startsWith("data:")) return u;
-  return BACKEND_URL + u;
+  // Attach JWT as ?token=... so native <audio>/<a download> requests authenticate
+  // (browsers don't send Authorization headers on those). The backend reads token
+  // from query string when no Authorization header is present.
+  let url = BACKEND_URL + u;
+  if (u.startsWith("/api/recordings/") && u.includes("/stream")) {
+    const t = localStorage.getItem("token");
+    if (t) url += (u.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(t);
+  }
+  return url;
 }
 
 export default function Recordings() {

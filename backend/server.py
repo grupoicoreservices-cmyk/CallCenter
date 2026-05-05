@@ -76,6 +76,10 @@ async def get_current_user(request: Request) -> dict:
         auth = request.headers.get("Authorization", "")
         if auth.startswith("Bearer "): token = auth[7:]
     if not token:
+        # Fallback: token via query string (used by <audio src> and <a download> tags
+        # since browsers cannot attach Authorization headers on those native requests).
+        token = request.query_params.get("token") or request.query_params.get("access_token")
+    if not token:
         raise HTTPException(status_code=401, detail="Não autenticado")
     try:
         payload = jwt.decode(token, _secret(), algorithms=[JWT_ALGO])
