@@ -53,7 +53,7 @@ export default function Realtime() {
             ) : (
               calls.map((c) => (
                 <tr key={c.id} className="table-row-hover" data-testid={`call-row-${c.id}`}>
-                  <td className="px-5 py-3"><StatusBadge status={c.status} pulse={c.status === "ringing"} /></td>
+                  <td className="px-5 py-3"><StatusBadge status={c.status} pulse={c.status === "ringing" || c.status === "queued"} /></td>
                   <td className="px-3 py-3">
                     <div className="flex items-center gap-2">
                       {c.agent_avatar

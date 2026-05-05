@@ -888,32 +888,65 @@ async def realtime_calls(user: dict = Depends(require_permission("realtime.view"
                     if rows is not None:
                         agents_db = await db.agents.find(f, {"_id": 0}).to_list(500)
                         ext_to_agent = {a.get("extension"): a for a in agents_db if a.get("extension")}
-                        # filter by domain if domain_name set
+                        queues_db = await db.queues.find(f, {"_id": 0}).to_list(500)
+                        ext_to_queue = {q.get("extension"): q for q in queues_db if q.get("extension")}
                         domain_name = (s.get("domain_name") or "").strip().lower()
+                        # Group bridged calls (b-leg has a `b_uuid` pointing to a-leg)
+                        # Build map: uuid -> row, and a set of "child" uuids to skip
+                        rows_by_uuid = {(r.get("uuid") or ""): r for r in rows}
+                        child_uuids = set()
+                        for r in rows:
+                            buid = r.get("b_uuid") or ""
+                            if buid and buid in rows_by_uuid:
+                                child_uuids.add(buid)
                         calls = []
                         for raw in rows:
+                            uid = raw.get("uuid") or ""
+                            if uid in child_uuids:
+                                continue  # skip b-leg of a bridged call (we'll show the parent)
                             n = normalize_esl_channel(raw)
-                            # filter by domain (presence_id or context contains domain)
+                            # Domain filter: check presence_id, context, dest_addr, sip_to_user
                             if domain_name:
-                                pid = (raw.get("presence_id") or "").lower()
-                                ctx = (raw.get("context") or "").lower()
-                                if domain_name not in pid and domain_name not in ctx:
+                                blob = " ".join([
+                                    str(raw.get("presence_id") or ""),
+                                    str(raw.get("context") or ""),
+                                    str(raw.get("dest") or ""),
+                                    str(raw.get("sip_to_user") or ""),
+                                    str(raw.get("sip_from_user") or ""),
+                                ]).lower()
+                                # if no domain match AND no extension/queue match, skip
+                                ext_dest = str(raw.get("dest") or "")
+                                in_known = ext_dest in ext_to_agent or ext_dest in ext_to_queue
+                                if domain_name not in blob and not in_known:
                                     continue
                             ext = n["destination_number"] or n["caller_id_number"]
                             ag = ext_to_agent.get(ext) or {}
+                            queue = ext_to_queue.get(ext) or {}
+                            # se está numa fila, status = "queued"
+                            in_queue = bool(queue and not ag)
                             elapsed = 0
                             if n["created_epoch"]:
                                 elapsed = int(time.time() - n["created_epoch"])
+                            # check b-leg for richer agent info if this is parent
+                            buid = raw.get("b_uuid") or ""
+                            b_leg = rows_by_uuid.get(buid) if buid else None
+                            if b_leg and not ag:
+                                b_dest = str(b_leg.get("dest") or b_leg.get("destination_number") or "")
+                                if b_dest in ext_to_agent:
+                                    ag = ext_to_agent[b_dest]
+                                    ext = b_dest
+                            status = "incall" if (n["answer_state"] == "answered" and ag) \
+                                     else ("queued" if in_queue else "ringing")
                             calls.append({
-                                "id": n["uuid"] or str(uuid.uuid4()),
-                                "agent_name": ag.get("name") or n["caller_id_name"] or "—",
+                                "id": uid or str(uuid.uuid4()),
+                                "agent_name": ag.get("name") or (queue.get("name") and f"Fila: {queue['name']}") or n["caller_id_name"] or "—",
                                 "agent_extension": ext or "—",
                                 "agent_avatar": ag.get("avatar"),
-                                "queue_name": "—",
+                                "queue_name": queue.get("name") or (b_leg and ext_to_queue.get(str(b_leg.get("dest") or "")) or {}).get("name") or "—",
                                 "caller_number": n["caller_id_number"] or "—",
                                 "direction": n["direction"],
                                 "elapsed_sec": elapsed,
-                                "status": "incall" if n["answer_state"] == "answered" else "ringing",
+                                "status": status,
                             })
                         return {"calls": calls, "source": "esl"}
                 except FreeSwitchESLError as e:

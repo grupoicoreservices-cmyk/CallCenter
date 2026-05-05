@@ -4,6 +4,7 @@ const MAP = {
   paused:   { bg: "bg-amber-100",   text: "text-amber-700",   dot: "bg-amber-500",   label: "Pausado" },
   offline:  { bg: "bg-zinc-100",    text: "text-zinc-600",    dot: "bg-zinc-400",    label: "Offline" },
   ringing:  { bg: "bg-blue-100",    text: "text-blue-700",    dot: "bg-blue-500",    label: "Tocando" },
+  queued:   { bg: "bg-amber-100",   text: "text-amber-700",   dot: "bg-amber-500",   label: "Na Fila" },
   answered: { bg: "bg-emerald-100", text: "text-emerald-700", dot: "bg-emerald-500", label: "Atendida" },
   missed:   { bg: "bg-red-100",     text: "text-red-700",     dot: "bg-red-500",     label: "Perdida" },
   abandoned:{ bg: "bg-red-100",     text: "text-red-700",     dot: "bg-red-500",     label: "Abandonada" },
