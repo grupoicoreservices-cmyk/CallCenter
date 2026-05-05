@@ -2995,7 +2995,7 @@ async def deprovision_agent(agent_id: str,
 
 
 
-async def _run_sync_for_tenant(tid: str, cdr_limit: int = 200) -> Dict[str, Any]:
+async def _run_sync_for_tenant(tid: str, cdr_limit: int = 5000) -> Dict[str, Any]:
     """Core sync logic reusable by manual endpoint + scheduler."""
     s = await db.fusionpbx_settings.find_one({"tenant_id": tid})
     if not s or not s.get("enabled"):
@@ -3024,6 +3024,7 @@ async def _run_sync_for_tenant(tid: str, cdr_limit: int = 200) -> Dict[str, Any]
         )
         ClientErr = FusionPBXError
     summary = {"agents_synced": 0, "queues_synced": 0, "calls_synced": 0,
+               "recordings_synced": 0,
                "errors": [], "started_at": datetime.now(timezone.utc).isoformat(),
                "agent_source": None}
     # Agents — preferimos call_center_agents (entidade dedicada).
@@ -3178,14 +3179,23 @@ async def _run_sync_for_tenant(tid: str, cdr_limit: int = 200) -> Dict[str, Any]
             }
             if existing:
                 await db.calls.update_one({"id": existing["id"]}, {"$set": doc})
+                call_id_for_rec = existing["id"]
             else:
                 doc["id"] = str(uuid.uuid4())
                 await db.calls.insert_one(doc)
-                if n.get("recording_uuid") and n["disposition"] == "answered":
+                call_id_for_rec = doc["id"]
+            # Idempotent recording upsert: insert if recording_uuid present, answered,
+            # and no existing recording doc has this external_id for this tenant.
+            if n.get("recording_uuid") and n["disposition"] == "answered":
+                rec_exists = await db.recordings.find_one(
+                    {"tenant_id": tid, "external_id": n["recording_uuid"]},
+                    {"_id": 0, "id": 1},
+                )
+                if not rec_exists:
                     rec_url = await client.get_recording_url(n["recording_uuid"])
                     await db.recordings.insert_one({
                         "id": str(uuid.uuid4()), "tenant_id": tid,
-                        "external_id": n["recording_uuid"], "call_id": doc["id"],
+                        "external_id": n["recording_uuid"], "call_id": call_id_for_rec,
                         "agent_id": doc["agent_id"], "agent_name": doc["agent_name"],
                         "queue_id": doc["queue_id"], "queue_name": doc["queue_name"],
                         "caller_number": n["caller_number"],
@@ -3193,6 +3203,7 @@ async def _run_sync_for_tenant(tid: str, cdr_limit: int = 200) -> Dict[str, Any]
                         "audio_url": rec_url, "size_mb": round(n["duration_sec"] * 0.012, 2),
                         "started_at": n["started_at"], "notes": "",
                     })
+                    summary["recordings_synced"] = summary.get("recordings_synced", 0) + 1
             summary["calls_synced"] += 1
     except ClientErr as e:
         summary["errors"].append(f"cdr: {e}")
@@ -3365,7 +3376,7 @@ async def fusion_diagnostics(user: dict = Depends(get_current_user), tenant_id: 
 
 @api.post("/fusionpbx/sync")
 async def fusion_sync(user: dict = Depends(get_current_user), tenant_id: Optional[str] = None,
-                      cdr_limit: int = 200):
+                      cdr_limit: int = 5000):
     """Sync manual (chamado pelo botão 'Sincronizar Agora')."""
     tid = await _resolve_tenant_for_fusion(user, tenant_id)
     if user.get("role") not in ("super_admin", "admin"):
@@ -3382,7 +3393,8 @@ async def fusion_sync(user: dict = Depends(get_current_user), tenant_id: Optiona
     await write_audit(user, "sync", "fusionpbx", tid, "Sync FusionPBX",
                       {"agents": summary.get("agents_synced", 0),
                        "queues": summary.get("queues_synced", 0),
-                       "calls": summary.get("calls_synced", 0)})
+                       "calls": summary.get("calls_synced", 0),
+                       "recordings": summary.get("recordings_synced", 0)})
     return summary
 
 
