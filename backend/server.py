@@ -2617,9 +2617,11 @@ async def stream_recording_endpoint(recording_id: str, request: Request,
     if not s or not s.get("sftp_host"):
         raise HTTPException(status_code=400, detail="SFTP não configurado para este tenant")
 
-    # rec.url tem o "fusionpbx://nome.wav" ou path absoluto. record_name também serve.
+    # Resolve filename: tenta campos diversos. Sync usa `audio_url` (`fusionpbx://...`)
+    # e `external_id` (record_name do CDR). Mantém compat com docs antigos.
     name = (rec.get("url") or rec.get("storage_key") or rec.get("file_name")
-            or rec.get("recording_uuid") or "")
+            or rec.get("recording_uuid") or rec.get("audio_url")
+            or rec.get("external_id") or "")
     if not name:
         raise HTTPException(status_code=400, detail="Gravação sem referência de arquivo")
 
