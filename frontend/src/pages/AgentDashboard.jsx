@@ -44,6 +44,22 @@ export default function AgentDashboard() {
   }
   useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); /* eslint-disable-next-line */ }, []);
 
+  // Cleanup ao fechar a aba/janela: notifica backend para remover tiers e
+  // marcar status Logged Out no FusionPBX. Usa sendBeacon (síncrono no unload).
+  useEffect(() => {
+    function onBeforeUnload() {
+      const token = localStorage.getItem("token");
+      if (!token) return;
+      const url = `${process.env.REACT_APP_BACKEND_URL || ""}/api/agents/me/logout?token=${encodeURIComponent(token)}`;
+      try {
+        const blob = new Blob([JSON.stringify({})], { type: "application/json" });
+        navigator.sendBeacon(url, blob);
+      } catch (_) { /* best effort */ }
+    }
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, []);
+
   async function changeStatus(newStatus) {
     if (!agent) return;
     setUpdating(true);

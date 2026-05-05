@@ -47,6 +47,10 @@ export function AuthProvider({ children }) {
   }
 
   async function logout() {
+    // If agent, also call /agents/me/logout to clean tiers + status in PBX
+    if (user && user.role === "agent") {
+      try { await api.post("/agents/me/logout"); } catch {}
+    }
     try { await api.post("/auth/logout"); } catch {}
     localStorage.removeItem("token");
     localStorage.removeItem("tenant_context");

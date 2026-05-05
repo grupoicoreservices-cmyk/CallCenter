@@ -1608,6 +1608,70 @@ async def set_my_extension(body: ExtensionReq, user: dict = Depends(get_current_
             "pbx_synced": pbx_synced, "pbx_error": pbx_error}
 
 
+@api.post("/agents/me/logout")
+async def agent_logout(request: Request):
+    """Cleanup ao fechar a aba/logout do agente: remove tiers e marca Logged Out.
+    Aceita JWT via Authorization, cookie OU query string `?token=...` para
+    funcionar com navigator.sendBeacon (não envia headers customizados)."""
+    token = request.cookies.get("access_token")
+    if not token:
+        auth = request.headers.get("Authorization", "")
+        if auth.startswith("Bearer "): token = auth[7:]
+    if not token:
+        token = request.query_params.get("token")
+    if not token:
+        return {"ok": False, "reason": "no token"}
+    try:
+        payload = jwt.decode(token, _secret(), algorithms=[JWT_ALGO])
+    except Exception:
+        return {"ok": False, "reason": "invalid token"}
+    user_id = payload.get("sub")
+    if not user_id:
+        return {"ok": False}
+    user = await db.users.find_one({"id": user_id}, {"_id": 0})
+    if not user or user.get("role") != "agent":
+        return {"ok": False}
+    aid = user.get("agent_id")
+    if not aid:
+        return {"ok": False}
+    tid = user.get("tenant_id")
+    agent = await db.agents.find_one({"id": aid, "tenant_id": tid}, {"_id": 0})
+    if not agent:
+        return {"ok": False}
+    s = await db.fusionpbx_settings.find_one({"tenant_id": tid}) or {}
+    pbx_logged_out = False
+    tiers_removed = 0
+    if (s.get("connection_type") == "db" and s.get("db_host")
+            and agent.get("external_id")):
+        try:
+            client = FusionPBXDBClient(
+                host=s["db_host"], port=int(s.get("db_port") or 5432),
+                database=s.get("db_name") or "fusionpbx",
+                username=s["db_username"], password=s.get("db_password") or "",
+                domain_uuid=s.get("domain_uuid"), ssl=bool(s.get("db_ssl")),
+            )
+            try:
+                tiers_removed = await client.remove_all_tiers_for_agent(agent["external_id"])
+            except Exception as e:
+                logger.warning("logout remove_all_tiers: %s", e)
+            try:
+                await client.update_agent_status(agent["external_id"], "Logged Out")
+                pbx_logged_out = True
+            except Exception as e:
+                logger.warning("logout update_agent_status: %s", e)
+        except Exception as e:
+            logger.warning("agent_logout PBX falhou: %s", e)
+    await db.agents.update_one(
+        {"id": aid},
+        {"$set": {"status": "offline", "pbx_status": "Logged Out",
+                   "active_queues": [],
+                   "logout_at": datetime.now(timezone.utc).isoformat()}})
+    await write_audit(user, "logout", "agent", aid,
+                       f"{agent.get('name')} desconectou",
+                       {"tiers_removed": tiers_removed, "pbx_logged_out": pbx_logged_out})
+    return {"ok": True, "tiers_removed": tiers_removed, "pbx_logged_out": pbx_logged_out}
+
+
 @api.get("/agents/me/queues")
 async def my_available_queues(user: dict = Depends(get_current_user)):
     """Return queues the agent has access to (via tier membership) plus

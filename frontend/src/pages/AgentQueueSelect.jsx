@@ -35,6 +35,21 @@ export default function AgentQueueSelect() {
     })();
   }, [user, navigate]);
 
+  // Cleanup on tab close
+  useEffect(() => {
+    function onBeforeUnload() {
+      const token = localStorage.getItem("token");
+      if (!token) return;
+      const url = `${process.env.REACT_APP_BACKEND_URL || ""}/api/agents/me/logout?token=${encodeURIComponent(token)}`;
+      try {
+        const blob = new Blob([JSON.stringify({})], { type: "application/json" });
+        navigator.sendBeacon(url, blob);
+      } catch (_) { /* best effort */ }
+    }
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, []);
+
   function toggle(qid) {
     setSelected((prev) => {
       const next = new Set(prev);
