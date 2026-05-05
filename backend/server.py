@@ -1076,6 +1076,88 @@ async def get_agent(agent_id: str, user: dict = Depends(require_permission("agen
     recent = await db.calls.find({"agent_id": agent_id, **f}, {"_id": 0}).sort("started_at", -1).to_list(20)
     return {"agent": a, "recent_calls": recent}
 
+
+VOXYRA_STATUS_TO_PBX = {
+    "online": "Available",
+    "available": "Available",
+    "paused": "On Break",
+    "break": "On Break",
+    "offline": "Logged Out",
+    "logged_out": "Logged Out",
+}
+VALID_VOXYRA_STATUSES = {"online", "paused", "offline"}
+
+
+class AgentStatusReq(BaseModel):
+    status: str  # "online" | "paused" | "offline"
+
+
+@api.put("/agents/{agent_id}/status")
+async def set_agent_status(agent_id: str, body: AgentStatusReq,
+                           user: dict = Depends(get_current_user)):
+    """Update agent status (Voxyra + FusionPBX). Agents can update their own;
+    admins/supervisors can update anyone in tenant."""
+    new_status = (body.status or "").lower().strip()
+    if new_status not in VALID_VOXYRA_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Status inválido. Use: {sorted(VALID_VOXYRA_STATUSES)}")
+    f = tenant_filter(user)
+    agent = await db.agents.find_one({"id": agent_id, **f}, {"_id": 0})
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agente não encontrado")
+    # Permission: agent só muda o seu próprio
+    if user.get("role") == "agent":
+        # Agent must be linked to this agent_id via user.agent_id
+        if user.get("agent_id") != agent_id:
+            raise HTTPException(status_code=403, detail="Você só pode alterar seu próprio status")
+    elif user.get("role") not in ("super_admin", "admin", "supervisor"):
+        raise HTTPException(status_code=403, detail="Sem permissão")
+
+    # Atualiza local
+    await db.agents.update_one(
+        {"id": agent_id}, {"$set": {"status": new_status,
+                                    "pbx_status": VOXYRA_STATUS_TO_PBX[new_status],
+                                    "status_changed_at": datetime.now(timezone.utc).isoformat()}})
+
+    # Tenta refletir no FusionPBX (modo DB)
+    pbx_synced = False
+    pbx_error = None
+    tid = agent.get("tenant_id") or tenant_scope(user)
+    if tid and agent.get("external_id"):
+        s = await db.fusionpbx_settings.find_one({"tenant_id": tid})
+        if s and (s.get("connection_type") == "db") and s.get("db_host"):
+            try:
+                client = FusionPBXDBClient(
+                    host=s["db_host"], port=int(s.get("db_port") or 5432),
+                    database=s.get("db_name") or "fusionpbx",
+                    username=s["db_username"], password=s.get("db_password") or "",
+                    domain_uuid=s.get("domain_uuid"), ssl=bool(s.get("db_ssl")),
+                )
+                await client.update_agent_status(agent["external_id"], VOXYRA_STATUS_TO_PBX[new_status])
+                pbx_synced = True
+            except FusionPBXDBError as e:
+                pbx_error = str(e)
+                logger.warning("set_agent_status: PBX update falhou: %s", e)
+
+    await write_audit(user, "update", "agent_status", agent_id,
+                      f"{agent.get('name')} → {new_status}",
+                      {"new_status": new_status, "pbx_synced": pbx_synced})
+    return {"ok": True, "status": new_status, "pbx_synced": pbx_synced, "pbx_error": pbx_error}
+
+
+@api.get("/agents/me/info")
+async def get_my_agent(user: dict = Depends(get_current_user)):
+    """Returns the agent linked to the logged-in user (for agent dashboard)."""
+    if user.get("role") != "agent":
+        raise HTTPException(status_code=400, detail="Apenas para usuários com perfil de agente")
+    aid = user.get("agent_id")
+    if not aid:
+        raise HTTPException(status_code=404, detail="Usuário não está vinculado a um agente. Peça a um admin para vincular em /usuários.")
+    agent = await db.agents.find_one({"id": aid, "tenant_id": user.get("tenant_id")}, {"_id": 0})
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agente vinculado não encontrado")
+    return {"agent": agent}
+
+
 @api.get("/queues")
 async def list_queues(user: dict = Depends(require_permission("queues.view"))):
     f = tenant_filter(user)

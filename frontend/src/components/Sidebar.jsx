@@ -8,6 +8,7 @@ import { api } from "../lib/api";
 import { useAuth } from "../contexts/AuthContext";
 
 const ITEMS = [
+  { to: "/agent", label: "Meu Painel", icon: Headphones, testid: "nav-agent", roleOnly: ["agent"] },
   { to: "/", label: "Dashboard", icon: LayoutDashboard, testid: "nav-dashboard", perm: "dashboard.view" },
   { to: "/realtime", label: "Tempo Real", icon: PhoneCall, testid: "nav-realtime", perm: "realtime.view" },
   { to: "/recordings", label: "Gravações", icon: Disc3, testid: "nav-recordings", perm: "recordings.view_own" },
@@ -29,7 +30,10 @@ export default function Sidebar() {
     api.get("/system/version").then(r => setAppVersion(r.data.version)).catch(() => {});
   }, []);
 
-  const visibleItems = ITEMS.filter((it) => !it.perm || hasPermission(it.perm));
+  const visibleItems = ITEMS.filter((it) => {
+    if (it.roleOnly) return it.roleOnly.includes(user?.role);
+    return !it.perm || hasPermission(it.perm);
+  });
   const tenantName = user?.tenant?.name;
   const tenantAccent = user?.tenant?.accent_color || "#09090b";
 
