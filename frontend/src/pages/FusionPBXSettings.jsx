@@ -28,6 +28,8 @@ export default function FusionPBXSettings() {
     db_host: "", db_port: 5432, db_name: "fusionpbx",
     db_username: "", db_password: "", db_ssl: false,
     esl_host: "", esl_port: 8021, esl_password: "", esl_timeout: 5.0,
+    sftp_host: "", sftp_port: 22, sftp_username: "", sftp_password: "",
+    sftp_private_key: "", sftp_recordings_path: "",
   });
   const [meta, setMeta] = useState({});
   const [saving, setSaving] = useState(false);
@@ -60,10 +62,18 @@ export default function FusionPBXSettings() {
         esl_port: data.esl_port || 8021,
         esl_password: "",
         esl_timeout: data.esl_timeout || 5.0,
+        sftp_host: data.sftp_host || "",
+        sftp_port: data.sftp_port || 22,
+        sftp_username: data.sftp_username || "",
+        sftp_password: "",
+        sftp_private_key: "",
+        sftp_recordings_path: data.sftp_recordings_path || "",
       });
       setMeta({
         configured: data.configured, api_key_set: data.api_key_set, password_set: data.password_set,
         esl_password_set: data.esl_password_set, esl_configured: data.esl_configured,
+        sftp_password_set: data.sftp_password_set, sftp_key_set: data.sftp_key_set,
+        sftp_configured: data.sftp_configured,
         last_sync_at: data.last_sync_at, last_sync_status: data.last_sync_status,
       });
     } catch (e) { /* ignore */ }
@@ -79,6 +89,8 @@ export default function FusionPBXSettings() {
       if (!payload.password) delete payload.password;
       if (!payload.db_password) delete payload.db_password;
       if (!payload.esl_password) delete payload.esl_password;
+      if (!payload.sftp_password) delete payload.sftp_password;
+      if (!payload.sftp_private_key) delete payload.sftp_private_key;
       await api.put(`/fusionpbx/settings${qs}`, payload);
       toast.success("Configuração salva");
       load();
@@ -158,6 +170,18 @@ export default function FusionPBXSettings() {
       const status = data.status?.[0] || "ok";
       toast.success(`ESL conectado · ${ch != null ? ch + ' canais ativos' : 'OK'} · ${status.slice(0,80)}`);
     } catch (e) { toast.error(formatApiError(e.response?.data?.detail) || "Erro ESL"); }
+    finally { setTesting(false); }
+  }
+
+  async function testSFTP() {
+    setTesting(true);
+    try {
+      const { data } = await api.post(`/fusionpbx/sftp/test${qs}`);
+      toast.success(`SFTP conectado · ${data.found} gravação(ões) encontrada(s) na pasta`);
+      if (data.samples?.length) {
+        console.log("Sample recordings:", data.samples);
+      }
+    } catch (e) { toast.error(formatApiError(e.response?.data?.detail) || "Erro SFTP"); }
     finally { setTesting(false); }
   }
 
@@ -409,6 +433,70 @@ sudo systemctl restart postgresql`}</pre>
             <div className="text-[11px] text-muted-foreground border-t border-blue-100 pt-2">
               💡 No FusionPBX edite <code className="bg-zinc-100 px-1 py-0.5 rounded">/etc/freeswitch/autoload_configs/event_socket.conf.xml</code>:
               defina <code className="bg-zinc-100 px-1 py-0.5 rounded">listen-ip = 0.0.0.0</code>, anote o <code className="bg-zinc-100 px-1 py-0.5 rounded">password</code>, e libere a porta 8021 só para o IP {window.location.hostname}.
+            </div>
+          </div>
+
+          <div className="border border-purple-200 bg-purple-50/40 rounded-sm p-3 space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-xs font-medium text-purple-900">
+                <Disc3 size={12} />
+                SFTP · Gravações de chamadas <span className="font-normal text-[10px] text-muted-foreground">(SSH/SFTP para baixar áudios do PBX sob demanda)</span>
+              </div>
+              {meta.sftp_configured && (
+                <span className="text-[10px] uppercase tracking-widest text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded">ativo</span>
+              )}
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              <div className="col-span-2">
+                <Label className="text-[11px]">Host SFTP</Label>
+                <Input value={form.sftp_host}
+                       onChange={(e) => setForm({ ...form, sftp_host: e.target.value })}
+                       placeholder="51.222.195.17 (geralmente o mesmo do FusionPBX)" data-testid="fpbx-sftp-host" />
+              </div>
+              <div>
+                <Label className="text-[11px]">Porta SSH</Label>
+                <Input type="number" value={form.sftp_port}
+                       onChange={(e) => setForm({ ...form, sftp_port: parseInt(e.target.value) || 22 })}
+                       data-testid="fpbx-sftp-port" />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <Label className="text-[11px]">Usuário SSH</Label>
+                <Input value={form.sftp_username}
+                       onChange={(e) => setForm({ ...form, sftp_username: e.target.value })}
+                       placeholder="voxyra_recordings" data-testid="fpbx-sftp-user" />
+              </div>
+              <div>
+                <Label className="text-[11px]">Senha SSH {meta.sftp_password_set && <span className="text-[10px] text-emerald-600 ml-1">✓</span>}</Label>
+                <Input type="password" value={form.sftp_password}
+                       onChange={(e) => setForm({ ...form, sftp_password: e.target.value })}
+                       placeholder={meta.sftp_password_set ? "(deixe vazio para manter)" : "senha da conta SSH"}
+                       data-testid="fpbx-sftp-password" />
+              </div>
+            </div>
+            <div>
+              <Label className="text-[11px]">Path das gravações <span className="text-muted-foreground">(opcional · auto-detecta se vazio)</span></Label>
+              <Input value={form.sftp_recordings_path}
+                     onChange={(e) => setForm({ ...form, sftp_recordings_path: e.target.value })}
+                     placeholder="/var/lib/freeswitch/recordings" data-testid="fpbx-sftp-path" />
+            </div>
+            <div className="flex items-center gap-2">
+              <Button type="button" variant="outline" onClick={testSFTP}
+                      disabled={testing || !form.sftp_host || !form.sftp_username}
+                      data-testid="fpbx-sftp-test">
+                {testing ? "Testando…" : "Testar SFTP"}
+              </Button>
+              <span className="text-[11px] text-muted-foreground">
+                Lista até 5 gravações encontradas para validar acesso e path
+              </span>
+            </div>
+            <div className="text-[11px] text-muted-foreground border-t border-purple-100 pt-2">
+              💡 Crie um usuário read-only no PBX:
+              <code className="bg-zinc-100 px-1 py-0.5 rounded ml-1">
+                useradd -m -s /sbin/nologin voxyra_recordings && chmod o+rx /var/lib/freeswitch/recordings
+              </code>.
+              Depois libere acesso somente leitura nessa pasta.
             </div>
           </div>
 

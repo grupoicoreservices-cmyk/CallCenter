@@ -8,6 +8,14 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "../components/ui/select";
 
+const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || "";
+
+function fullUrl(u) {
+  if (!u) return "";
+  if (u.startsWith("http") || u.startsWith("blob:") || u.startsWith("data:")) return u;
+  return BACKEND_URL + u;
+}
+
 export default function Recordings() {
   const [rows, setRows] = useState([]);
   const [agents, setAgents] = useState([]);
@@ -123,9 +131,11 @@ export default function Recordings() {
               <tr key={r.id} className={`table-row-hover ${playingId === r.id ? "bg-zinc-50" : ""}`} data-testid={`rec-row-${r.id}`}>
                 <td className="px-3 py-3">
                   <button
-                    onClick={() => togglePlay(r)}
+                    onClick={() => r.streamable && togglePlay(r)}
+                    disabled={!r.streamable}
+                    title={r.unavailable_reason || ""}
                     data-testid={`rec-play-${r.id}`}
-                    className="w-8 h-8 rounded-full border border-border hover:bg-zinc-100 flex items-center justify-center transition-colors"
+                    className={`w-8 h-8 rounded-full border flex items-center justify-center transition-colors ${r.streamable ? "border-border hover:bg-zinc-100" : "border-zinc-200 text-zinc-300 cursor-not-allowed"}`}
                   >
                     {playingId === r.id ? <Pause size={14} /> : <Play size={14} className="ml-0.5" />}
                   </button>
@@ -135,11 +145,15 @@ export default function Recordings() {
                 <td className="px-3 py-3">{r.queue_name}</td>
                 <td className="px-3 py-3 font-mono text-xs">{r.caller_number}</td>
                 <td className="px-3 py-3 text-right font-mono">{fmtDuration(r.duration_sec)}</td>
-                <td className="px-3 py-3 text-right font-mono text-xs text-muted-foreground">{r.size_mb} MB</td>
+                <td className="px-3 py-3 text-right font-mono text-xs text-muted-foreground">
+                  {r.streamable ? `${r.size_mb || ""} MB` : <span className="text-amber-600">indisponível</span>}
+                </td>
                 <td className="px-3 py-3 text-right">
-                  <a href={r.audio_url} download className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground" data-testid={`rec-download-${r.id}`}>
-                    <Download size={14} />
-                  </a>
+                  {r.streamable ? (
+                    <a href={fullUrl(r.audio_url)} download className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground" data-testid={`rec-download-${r.id}`}>
+                      <Download size={14} />
+                    </a>
+                  ) : null}
                 </td>
               </tr>
             ))}
@@ -182,7 +196,8 @@ export default function Recordings() {
           </div>
           <audio
             ref={audioRef}
-            src={playing.audio_url}
+            src={fullUrl(playing.audio_url)}
+            crossOrigin="use-credentials"
             onTimeUpdate={onTime}
             onLoadedMetadata={onTime}
             onEnded={() => setPlayingId(null)}

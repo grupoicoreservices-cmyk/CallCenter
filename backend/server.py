@@ -15,6 +15,7 @@ import bcrypt
 import jwt
 import re
 from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, Query
+from fastapi.responses import StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, validator
@@ -26,6 +27,9 @@ from integrations.fusionpbx import (
     normalize_extension, normalize_agent, normalize_queue, normalize_cdr,
 )
 from integrations.fusionpbx_db import FusionPBXDBClient, FusionPBXDBError
+from integrations.fusionpbx_sftp import (
+    find_recording, stream_recording, RecordingFetchError,
+)
 from integrations.freeswitch_esl import (
     FreeSwitchESL, FreeSwitchESLError, normalize_esl_channel,
 )
@@ -1215,6 +1219,27 @@ async def list_recordings(
             {"agent_name": {"$regex": search, "$options": "i"}},
         ]
     items = await db.recordings.find(q, {"_id": 0}).sort("started_at", -1).to_list(limit)
+    # If recording came from PBX (storage_key starts with fusionpbx://), point audio_url to stream endpoint
+    tid = tenant_scope(user)
+    sftp_ok = False
+    if tid:
+        s = await db.fusionpbx_settings.find_one({"tenant_id": tid})
+        sftp_ok = bool(s and s.get("sftp_host") and s.get("sftp_username")
+                       and (s.get("sftp_password") or s.get("sftp_private_key")))
+    api_base = os.environ.get("PUBLIC_API_BASE", "")
+    for rec in items:
+        url = rec.get("audio_url") or ""
+        is_pbx = (url and url.startswith("fusionpbx://")) \
+                 or (rec.get("storage_key", "").startswith("fusionpbx://"))
+        if is_pbx and sftp_ok:
+            rec["audio_url"] = f"/api/recordings/{rec['id']}/stream"
+            rec["streamable"] = True
+        elif is_pbx and not sftp_ok:
+            rec["audio_url"] = ""
+            rec["streamable"] = False
+            rec["unavailable_reason"] = "Configure SFTP em Central PBX → Configuração para ouvir gravações reais"
+        else:
+            rec["streamable"] = bool(url)
     return {"recordings": items}
 
 @api.get("/recordings/{rec_id}")
@@ -1986,6 +2011,13 @@ class FusionPBXSettings(BaseModel):
     esl_port: int = 8021
     esl_password: Optional[str] = None
     esl_timeout: float = 5.0
+    # SFTP — para baixar gravações
+    sftp_host: Optional[str] = None
+    sftp_port: int = 22
+    sftp_username: Optional[str] = None
+    sftp_password: Optional[str] = None
+    sftp_private_key: Optional[str] = None
+    sftp_recordings_path: Optional[str] = None  # ex: /var/lib/freeswitch/recordings
     # Common
     domain_uuid: Optional[str] = None
     domain_name: Optional[str] = None
@@ -2001,6 +2033,7 @@ def _serialize_fusion_settings(s: Optional[dict], mask: bool = True) -> dict:
         "path_extensions", "path_queues", "path_agents", "path_cdr",
         "db_host", "db_port", "db_name", "db_username", "db_ssl",
         "esl_host", "esl_port", "esl_timeout",
+        "sftp_host", "sftp_port", "sftp_username", "sftp_recordings_path",
     ]}
     out["connection_type"] = s.get("connection_type") or "rest"
     if out["connection_type"] == "db":
@@ -2012,11 +2045,16 @@ def _serialize_fusion_settings(s: Optional[dict], mask: bool = True) -> dict:
     out["db_password_set"] = bool(s.get("db_password"))
     out["esl_password_set"] = bool(s.get("esl_password"))
     out["esl_configured"] = bool(s.get("esl_host"))
+    out["sftp_password_set"] = bool(s.get("sftp_password"))
+    out["sftp_key_set"] = bool(s.get("sftp_private_key"))
+    out["sftp_configured"] = bool(s.get("sftp_host") and s.get("sftp_username") and (s.get("sftp_password") or s.get("sftp_private_key")))
     if not mask:
         out["api_key"] = s.get("api_key")
         out["password"] = s.get("password")
         out["db_password"] = s.get("db_password")
         out["esl_password"] = s.get("esl_password")
+        out["sftp_password"] = s.get("sftp_password")
+        out["sftp_private_key"] = s.get("sftp_private_key")
     return out
 
 
@@ -2384,7 +2422,8 @@ async def put_fusion_settings(body: FusionPBXSettings, user: dict = Depends(get_
     payload = body.dict(exclude_unset=True)
     existing = await db.fusionpbx_settings.find_one({"tenant_id": tid}) or {}
     # Don't overwrite secrets if a masked/empty value was sent and one already exists
-    for k in ("api_key", "password", "db_password", "esl_password"):
+    for k in ("api_key", "password", "db_password", "esl_password",
+              "sftp_password", "sftp_private_key"):
         if k in payload and not payload[k]:
             payload[k] = existing.get(k)
     payload["tenant_id"] = tid
@@ -2424,6 +2463,135 @@ async def _build_fusion_client(tid: str):
         verify_ssl=bool(s.get("verify_ssl", True)),
         custom_paths=custom_paths,
     )
+
+
+@api.post("/fusionpbx/sftp/test")
+async def fusion_sftp_test(user: dict = Depends(get_current_user), tenant_id: Optional[str] = None):
+    tid = await _resolve_tenant_for_fusion(user, tenant_id)
+    if user.get("role") not in ("super_admin", "admin"):
+        raise HTTPException(status_code=403, detail="Sem permissão")
+    s = await db.fusionpbx_settings.find_one({"tenant_id": tid})
+    if not s or not s.get("sftp_host"):
+        raise HTTPException(status_code=400, detail="Configure SFTP host primeiro")
+    # TCP pre-check
+    import socket as _socket
+    try:
+        with _socket.create_connection((s["sftp_host"], int(s.get("sftp_port") or 22)), timeout=5):
+            pass
+    except Exception as e:
+        raise HTTPException(status_code=502,
+            detail=f"Não consegui abrir TCP em {s['sftp_host']}:{s.get('sftp_port', 22)} → "
+                   f"[{type(e).__name__}] {e}. Verifique firewall e SSH server.")
+    # Lista os 5 últimos arquivos da pasta de recordings (smoke test)
+    import asyncssh
+    base = s.get("sftp_recordings_path") or "/var/lib/freeswitch/recordings"
+    domain = s.get("domain_name") or ""
+    try:
+        kwargs = {"host": s["sftp_host"], "port": int(s.get("sftp_port") or 22),
+                  "username": s["sftp_username"], "known_hosts": None, "client_keys": None}
+        if s.get("sftp_private_key"):
+            kwargs["client_keys"] = [asyncssh.import_private_key(s["sftp_private_key"])]
+        elif s.get("sftp_password"):
+            kwargs["password"] = s["sftp_password"]
+        async with asyncssh.connect(**kwargs) as conn:
+            search_dir = f"{base}/{domain}" if domain else base
+            result = await conn.run(
+                f"find {search_dir} -name '*.wav' -o -name '*.mp3' 2>/dev/null | head -5",
+                check=False,
+            )
+            files = (result.stdout or "").strip().splitlines()
+            return {"ok": True, "host": s["sftp_host"], "found": len(files), "samples": files}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Falha SFTP [{type(e).__name__}]: {e}")
+
+
+@api.get("/recordings/{recording_id}/stream")
+async def stream_recording_endpoint(recording_id: str, request: Request,
+                                    user: dict = Depends(get_current_user)):
+    """Streams the recording file (.wav/.mp3) from FusionPBX via SFTP.
+    Supports HTTP Range for audio seeking."""
+    f = tenant_filter(user)
+    rec = await db.recordings.find_one({"id": recording_id, **f}, {"_id": 0})
+    if not rec:
+        raise HTTPException(status_code=404, detail="Gravação não encontrada")
+    # Permission: agent with view_own only sees their own
+    if user.get("role") == "agent" and not user.get("permissions"):
+        if rec.get("agent_id") != user.get("agent_id"):
+            raise HTTPException(status_code=403, detail="Sem permissão para esta gravação")
+
+    tid = rec.get("tenant_id")
+    s = await db.fusionpbx_settings.find_one({"tenant_id": tid})
+    if not s or not s.get("sftp_host"):
+        raise HTTPException(status_code=400, detail="SFTP não configurado para este tenant")
+
+    # rec.url tem o "fusionpbx://nome.wav" ou path absoluto. record_name também serve.
+    name = (rec.get("url") or rec.get("storage_key") or rec.get("file_name")
+            or rec.get("recording_uuid") or "")
+    if not name:
+        raise HTTPException(status_code=400, detail="Gravação sem referência de arquivo")
+
+    try:
+        remote_path, total = await find_recording(
+            host=s["sftp_host"], port=int(s.get("sftp_port") or 22),
+            username=s["sftp_username"], password=s.get("sftp_password"),
+            key=s.get("sftp_private_key"),
+            relative_or_name=name,
+            base_path=s.get("sftp_recordings_path"),
+            domain_name=s.get("domain_name"),
+        )
+    except RecordingFetchError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    # Detect content type
+    lower = remote_path.lower()
+    if lower.endswith(".mp3"): ctype = "audio/mpeg"
+    elif lower.endswith(".wav"): ctype = "audio/wav"
+    elif lower.endswith(".ogg"): ctype = "audio/ogg"
+    else: ctype = "application/octet-stream"
+
+    # Range header
+    range_header = request.headers.get("range") or request.headers.get("Range")
+    start, end = 0, total - 1 if total else None
+    status_code = 200
+    headers: Dict[str, str] = {
+        "Accept-Ranges": "bytes",
+        "Content-Type": ctype,
+        "Cache-Control": "private, max-age=3600",
+    }
+    if range_header and total:
+        try:
+            r = range_header.replace("bytes=", "").split("-")
+            start = int(r[0]) if r[0] else 0
+            end = int(r[1]) if len(r) > 1 and r[1] else total - 1
+            length = end - start + 1
+            headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+            headers["Content-Length"] = str(length)
+            status_code = 206
+        except Exception:
+            length = total
+            headers["Content-Length"] = str(total)
+    else:
+        length = total if total else None
+        if total: headers["Content-Length"] = str(total)
+
+    async def gen():
+        try:
+            async for chunk in stream_recording(
+                host=s["sftp_host"], port=int(s.get("sftp_port") or 22),
+                username=s["sftp_username"], password=s.get("sftp_password"),
+                key=s.get("sftp_private_key"),
+                remote_path=remote_path,
+                offset=start,
+                length=length if range_header else None,
+            ):
+                yield chunk
+        except RecordingFetchError as e:
+            logger.error("stream_recording falhou: %s", e)
+            return
+
+    await write_audit(user, "play", "recording", recording_id,
+                      f"Gravação {recording_id}", {"size": total, "range": range_header})
+    return StreamingResponse(gen(), status_code=status_code, headers=headers, media_type=ctype)
 
 
 @api.post("/fusionpbx/esl/test")
