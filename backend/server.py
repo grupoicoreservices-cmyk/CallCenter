@@ -553,6 +553,14 @@ async def upload_asset(file: UploadFile = File(...), kind: str = "logo",
 
 
 # ---------- Site Branding (global, super admin) ----------
+class SiteBrandingMode(BaseModel):
+    hero_title: Optional[str] = None
+    hero_subtitle: Optional[str] = None
+    accent_color: Optional[str] = None
+    wallpaper_url: Optional[str] = None
+    logo_url: Optional[str] = None
+
+
 class SiteBranding(BaseModel):
     brand_name: Optional[str] = None
     brand_subtitle: Optional[str] = None
@@ -564,6 +572,7 @@ class SiteBranding(BaseModel):
     footer_text: Optional[str] = None
     release_version: Optional[str] = None
     accent_color: Optional[str] = None
+    modes: Optional[Dict[str, SiteBrandingMode]] = None  # {agent, master, admin}
 
 
 def _site_branding_defaults() -> dict:
@@ -579,6 +588,11 @@ def _site_branding_defaults() -> dict:
         "footer_text": "",
         "release_version": "",
         "accent_color": "#09090b",
+        "modes": {
+            "agent":  {"hero_title": "", "hero_subtitle": "", "accent_color": "", "wallpaper_url": "", "logo_url": ""},
+            "master": {"hero_title": "", "hero_subtitle": "", "accent_color": "", "wallpaper_url": "", "logo_url": ""},
+            "admin":  {"hero_title": "", "hero_subtitle": "", "accent_color": "", "wallpaper_url": "", "logo_url": ""},
+        },
     }
 
 
@@ -587,16 +601,34 @@ async def get_site_branding():
     """Public: returns global site branding for login pages and document head."""
     doc = await db.site_branding.find_one({"id": "global"}, {"_id": 0})
     if not doc:
-        doc = _site_branding_defaults()
+        return _site_branding_defaults()
+    # Ensure 'modes' is always present and complete
+    defaults = _site_branding_defaults()
+    modes = doc.get("modes") or {}
+    out_modes = {}
+    for k in ("agent", "master", "admin"):
+        out_modes[k] = {**defaults["modes"][k], **(modes.get(k) or {})}
+    doc["modes"] = out_modes
     return doc
 
 
 @api.put("/branding/site")
 async def update_site_branding(body: SiteBranding,
                                 user: dict = Depends(require_super_admin())):
-    payload = {k: v for k, v in body.dict().items() if v is not None}
+    raw = body.dict(exclude_unset=True)
+    payload = {k: v for k, v in raw.items() if v is not None and k != "modes"}
     base = await db.site_branding.find_one({"id": "global"}, {"_id": 0}) or _site_branding_defaults()
     base.update(payload)
+    if body.modes is not None:
+        existing_modes = base.get("modes") or {}
+        for mode_key, mode_val in body.modes.items():
+            if mode_key not in ("agent", "master", "admin"):
+                continue
+            current = existing_modes.get(mode_key) or {}
+            mv = mode_val.dict(exclude_unset=True) if hasattr(mode_val, "dict") else (mode_val or {})
+            current.update({k: v for k, v in mv.items() if v is not None})
+            existing_modes[mode_key] = current
+        base["modes"] = existing_modes
     base["id"] = "global"
     base["updated_at"] = datetime.now(timezone.utc).isoformat()
     await db.site_branding.update_one({"id": "global"}, {"$set": base}, upsert=True)

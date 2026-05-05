@@ -104,14 +104,19 @@ export default function LoginShell({ mode = "agent" }) {
 
   const meta = MODE_META[mode];
   const Icon = meta.icon;
-  const accent = isAdmin ? (site?.accent_color || "#09090b") : (branding?.accent_color || meta.accent);
-  const heroTitle = (!branding && site?.login_title) || meta.heroTitle;
-  const heroDesc  = (!branding && site?.login_subtitle) || meta.heroDesc;
+  // Per-mode overrides from site branding
+  const modeBrand = (site?.modes && site.modes[mode]) || {};
+  const accent = isAdmin
+    ? (modeBrand.accent_color || site?.accent_color || "#09090b")
+    : (branding?.accent_color || modeBrand.accent_color || meta.accent);
+  const heroTitle = (!branding && (modeBrand.hero_title || site?.login_title)) || meta.heroTitle;
+  const heroDesc  = (!branding && (modeBrand.hero_subtitle || site?.login_subtitle)) || meta.heroDesc;
   const brandName = branding?.name || site?.brand_name || "Voxyra CCA";
-  const brandLogo = branding?.logo_url || site?.logo_url || "";
-  const wallpaperUrl = !branding && site?.wallpaper_url
-    ? (site.wallpaper_url.startsWith("http") ? site.wallpaper_url
-       : (process.env.REACT_APP_BACKEND_URL || "") + site.wallpaper_url)
+  const brandLogo = branding?.logo_url || modeBrand.logo_url || site?.logo_url || "";
+  const wpRaw = !branding ? (modeBrand.wallpaper_url || site?.wallpaper_url) : "";
+  const wallpaperUrl = wpRaw
+    ? (wpRaw.startsWith("http") ? wpRaw
+       : (process.env.REACT_APP_BACKEND_URL || "") + wpRaw)
     : "";
   const footerText = site?.footer_text || `© ${new Date().getFullYear()} ${site?.brand_name || "Voxyra CCA"}`;
   const release = site?.release_version || "";

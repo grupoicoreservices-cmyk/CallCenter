@@ -5,26 +5,42 @@ import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Textarea } from "../components/ui/textarea";
-import { Palette, Save, Image as ImageIcon, Upload, Shield, Trash2 } from "lucide-react";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "../components/ui/tabs";
+import { Palette, Save, Image as ImageIcon, Upload, Shield, Trash2, Globe, User, Crown, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "../contexts/AuthContext";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || "";
 
-const FIELDS = [
-  { key: "brand_name",     label: "Nome da marca",         hint: "Aparece no header da sidebar e no painel de login.", placeholder: "Voxyra CCA" },
-  { key: "brand_subtitle", label: "Subtítulo",             hint: "Linha pequena abaixo do nome.",                       placeholder: "Callcenter Analytical" },
-  { key: "login_title",    label: "Título do login",       hint: "Frase principal exibida no painel esquerdo do login.", placeholder: "Atenda. Resolva. Brilhe." },
-  { key: "login_subtitle", label: "Descrição do login",    hint: "Texto descritivo abaixo do título.",                  placeholder: "Plataforma de gestão de operação de callcenter." },
-  { key: "footer_text",    label: "Texto do rodapé",       hint: "Aparece no rodapé das páginas de login.",             placeholder: "© 2026 Voxyra CCA" },
-  { key: "release_version",label: "Release / versão",     hint: "Mostrado no rodapé como tag de versão.",              placeholder: "v1.0.0" },
-  { key: "accent_color",   label: "Cor de destaque (hex)", hint: "Botões e detalhes (ex: #0EA5E9).",                    placeholder: "#09090b" },
+const GLOBAL_FIELDS = [
+  { key: "brand_name",      label: "Nome da marca",          hint: "Aparece no header da sidebar.",                placeholder: "Voxyra CCA" },
+  { key: "brand_subtitle",  label: "Subtítulo",              hint: "Linha pequena abaixo do nome.",                placeholder: "Callcenter Analytical" },
+  { key: "footer_text",     label: "Texto do rodapé",        hint: "Mostrado no rodapé das páginas de login.",     placeholder: "© 2026 Voxyra CCA",   long: true },
+  { key: "release_version", label: "Release / versão",      hint: "Tag exibida ao lado do rodapé.",               placeholder: "v1.0.0" },
+  { key: "accent_color",    label: "Cor de destaque global", hint: "Fallback quando o modo não tem cor própria.", placeholder: "#09090b" },
 ];
 
-const ASSETS = [
-  { key: "logo_url",      label: "Logo",      hint: "PNG/SVG transparente. Aparece no header.",            kind: "logo",      ratio: "1:1" },
-  { key: "wallpaper_url", label: "Wallpaper", hint: "Imagem de fundo do painel esquerdo do login.",        kind: "wallpaper", ratio: "16:9" },
-  { key: "favicon_url",   label: "Favicon",   hint: "Ícone exibido na aba do navegador (32x32 / .ico).",    kind: "favicon",   ratio: "1:1" },
+const GLOBAL_ASSETS = [
+  { key: "logo_url",      label: "Logo padrão",      hint: "Usada quando o modo não tem logo própria.",  kind: "logo",      ratio: "1:1" },
+  { key: "favicon_url",   label: "Favicon",          hint: "Ícone na aba do navegador (32x32 / .ico).",   kind: "favicon",   ratio: "1:1" },
+  { key: "wallpaper_url", label: "Wallpaper padrão", hint: "Fundo do painel quando o modo não definir.",  kind: "wallpaper", ratio: "16:9" },
+];
+
+const MODE_FIELDS = [
+  { key: "hero_title",     label: "Título da página",   hint: "Frase principal do painel esquerdo.",  placeholder: "Atenda. Resolva. Brilhe.", long: false },
+  { key: "hero_subtitle",  label: "Descrição",          hint: "Texto descritivo abaixo do título.",   placeholder: "Acesse suas chamadas em tempo real, gravações e métricas.", long: true },
+  { key: "accent_color",   label: "Cor de destaque",    hint: "Cor do botão de login (hex).",          placeholder: "#0EA5E9" },
+];
+
+const MODE_ASSETS = [
+  { key: "logo_url",      label: "Logo do modo",   hint: "PNG/SVG. Sobrepõe a logo global.",       kind: "logo",      ratio: "1:1" },
+  { key: "wallpaper_url", label: "Wallpaper",      hint: "Imagem de fundo do painel esquerdo.",    kind: "wallpaper", ratio: "16:9" },
+];
+
+const MODES = [
+  { key: "agent",  label: "Agente",      icon: User,        accent: "#0EA5E9" },
+  { key: "master", label: "Master",      icon: ShieldCheck, accent: "#10B981" },
+  { key: "admin",  label: "Super Admin", icon: Crown,       accent: "#F59E0B" },
 ];
 
 function fullUrl(u) {
@@ -33,17 +49,30 @@ function fullUrl(u) {
   return BACKEND_URL + u;
 }
 
+function emptyMode() {
+  return { hero_title: "", hero_subtitle: "", accent_color: "", wallpaper_url: "", logo_url: "" };
+}
+
 export default function SiteBranding() {
   const { user } = useAuth();
-  const [form, setForm] = useState({});
+  const [form, setForm] = useState({ modes: { agent: emptyMode(), master: emptyMode(), admin: emptyMode() } });
   const [saving, setSaving] = useState(false);
-  const [uploading, setUploading] = useState(null);
-  const fileRefs = { logo: useRef(), wallpaper: useRef(), favicon: useRef() };
+  const [uploading, setUploading] = useState(null);  // "global:logo" | "agent:wallpaper"...
+  const [tab, setTab] = useState("global");
+  const fileRef = useRef();
+  const [pendingUpload, setPendingUpload] = useState(null);  // {scope, key, kind}
 
   async function load() {
     try {
       const { data } = await api.get("/branding/site");
-      setForm(data);
+      setForm({
+        ...data,
+        modes: {
+          agent:  { ...emptyMode(), ...(data.modes?.agent  || {}) },
+          master: { ...emptyMode(), ...(data.modes?.master || {}) },
+          admin:  { ...emptyMode(), ...(data.modes?.admin  || {}) },
+        },
+      });
     } catch (e) {
       toast.error(formatApiError(e));
     }
@@ -62,23 +91,35 @@ export default function SiteBranding() {
     );
   }
 
-  function setField(k, v) { setForm((f) => ({ ...f, [k]: v })); }
+  function setGlobal(k, v) { setForm((f) => ({ ...f, [k]: v })); }
+  function setMode(modeKey, k, v) {
+    setForm((f) => ({ ...f, modes: { ...f.modes, [modeKey]: { ...f.modes[modeKey], [k]: v } } }));
+  }
 
-  async function onUpload(kind, file) {
-    if (!file) return;
-    setUploading(kind);
+  function triggerUpload(scope, key, kind) {
+    setPendingUpload({ scope, key, kind });
+    fileRef.current?.click();
+  }
+
+  async function onFilePicked(file) {
+    if (!file || !pendingUpload) return;
+    const { scope, key, kind } = pendingUpload;
+    setUploading(`${scope}:${kind}`);
     try {
       const fd = new FormData();
       fd.append("file", file);
       const { data } = await api.post(`/uploads/asset?kind=${kind}`, fd, {
         headers: { "Content-Type": "multipart/form-data" },
       });
-      setField(`${kind}_url`, data.url);
+      if (scope === "global") setGlobal(key, data.url);
+      else setMode(scope, key, data.url);
       toast.success(`${kind} enviado`);
     } catch (e) {
       toast.error(formatApiError(e));
     } finally {
       setUploading(null);
+      setPendingUpload(null);
+      if (fileRef.current) fileRef.current.value = "";
     }
   }
 
@@ -86,9 +127,15 @@ export default function SiteBranding() {
     setSaving(true);
     try {
       const { data } = await api.put("/branding/site", form);
-      setForm(data);
+      setForm({
+        ...data,
+        modes: {
+          agent:  { ...emptyMode(), ...(data.modes?.agent  || {}) },
+          master: { ...emptyMode(), ...(data.modes?.master || {}) },
+          admin:  { ...emptyMode(), ...(data.modes?.admin  || {}) },
+        },
+      });
       toast.success("Personalização salva");
-      // Re-apply favicon/title immediately
       window.dispatchEvent(new CustomEvent("voxyra:branding-updated", { detail: data }));
     } catch (e) {
       toast.error(formatApiError(e));
@@ -98,88 +145,87 @@ export default function SiteBranding() {
   }
 
   return (
-    <Layout title="Personalização" subtitle="Customize a página de login, ícones e rodapé">
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 max-w-6xl">
-        {/* Texts */}
-        <section className="border border-border bg-card rounded-sm p-6" data-testid="branding-texts">
-          <div className="flex items-center gap-2 mb-5">
-            <Palette size={16} />
-            <h2 className="font-display font-semibold text-lg">Textos & Cores</h2>
-          </div>
-          <div className="space-y-4">
-            {FIELDS.map((f) => (
-              <div key={f.key} className="space-y-1.5">
-                <Label htmlFor={f.key}>{f.label}</Label>
-                {f.key === "login_subtitle" || f.key === "footer_text" ? (
-                  <Textarea id={f.key} rows={2} placeholder={f.placeholder}
-                    value={form[f.key] ?? ""} onChange={(e) => setField(f.key, e.target.value)}
-                    data-testid={`branding-field-${f.key}`} />
-                ) : (
-                  <Input id={f.key} placeholder={f.placeholder}
-                    value={form[f.key] ?? ""} onChange={(e) => setField(f.key, e.target.value)}
-                    data-testid={`branding-field-${f.key}`} />
-                )}
-                <p className="text-[11px] text-muted-foreground">{f.hint}</p>
-              </div>
-            ))}
-          </div>
-        </section>
+    <Layout title="Personalização" subtitle="Customize logos, wallpapers e textos das páginas de login">
+      <input ref={fileRef} type="file"
+        accept=".png,.jpg,.jpeg,.webp,.svg,.ico"
+        className="hidden"
+        onChange={(e) => onFilePicked(e.target.files?.[0])} />
 
-        {/* Assets */}
-        <section className="border border-border bg-card rounded-sm p-6" data-testid="branding-assets">
-          <div className="flex items-center gap-2 mb-5">
-            <ImageIcon size={16} />
-            <h2 className="font-display font-semibold text-lg">Imagens</h2>
+      <Tabs value={tab} onValueChange={setTab} className="max-w-6xl">
+        <TabsList className="mb-6" data-testid="branding-tabs">
+          <TabsTrigger value="global" data-testid="branding-tab-global"><Globe size={14} className="mr-1.5" />Geral</TabsTrigger>
+          {MODES.map((m) => {
+            const Icon = m.icon;
+            return (
+              <TabsTrigger key={m.key} value={m.key} data-testid={`branding-tab-${m.key}`}>
+                <Icon size={14} className="mr-1.5" /> {m.label}
+              </TabsTrigger>
+            );
+          })}
+        </TabsList>
+
+        {/* Global tab */}
+        <TabsContent value="global" className="space-y-6">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <section className="border border-border bg-card rounded-sm p-6" data-testid="branding-global-texts">
+              <div className="flex items-center gap-2 mb-5"><Palette size={16} /><h2 className="font-display font-semibold text-lg">Textos & Cores</h2></div>
+              <div className="space-y-4">
+                {GLOBAL_FIELDS.map((f) => (
+                  <FieldRow key={f.key} f={f} value={form[f.key] ?? ""} onChange={(v) => setGlobal(f.key, v)} testid={`branding-global-${f.key}`} />
+                ))}
+              </div>
+            </section>
+            <section className="border border-border bg-card rounded-sm p-6" data-testid="branding-global-assets">
+              <div className="flex items-center gap-2 mb-5"><ImageIcon size={16} /><h2 className="font-display font-semibold text-lg">Imagens globais</h2></div>
+              <div className="space-y-4">
+                {GLOBAL_ASSETS.map((a) => (
+                  <AssetRow key={a.key} a={a} url={form[a.key]}
+                    uploading={uploading === `global:${a.kind}`}
+                    onUpload={() => triggerUpload("global", a.key, a.kind)}
+                    onClear={() => setGlobal(a.key, "")} />
+                ))}
+              </div>
+            </section>
           </div>
-          <div className="space-y-5">
-            {ASSETS.map((a) => {
-              const url = form[a.key];
-              const isFav = a.kind === "favicon";
-              const isWall = a.kind === "wallpaper";
-              return (
-                <div key={a.key} className="border border-border rounded-sm p-3" data-testid={`branding-asset-${a.kind}`}>
-                  <div className="flex items-center justify-between gap-3 mb-3">
-                    <div>
-                      <div className="text-sm font-medium">{a.label}</div>
-                      <div className="text-[11px] text-muted-foreground">{a.hint}</div>
-                    </div>
-                    <div className="text-[10px] uppercase tracking-widest text-muted-foreground">{a.ratio}</div>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <div className={`shrink-0 border border-border rounded-sm bg-zinc-50 overflow-hidden flex items-center justify-center ${isWall ? "w-32 h-20" : isFav ? "w-12 h-12" : "w-16 h-16"}`}>
-                      {url ? (
-                        <img src={fullUrl(url)} alt={a.label} className={isWall ? "w-full h-full object-cover" : "w-full h-full object-contain"} />
-                      ) : (
-                        <ImageIcon size={isFav ? 16 : 20} className="text-zinc-300" />
-                      )}
-                    </div>
-                    <div className="flex-1 flex items-center gap-2">
-                      <input ref={fileRefs[a.kind]} type="file"
-                        accept={a.kind === "favicon" ? ".png,.ico,.svg" : ".png,.jpg,.jpeg,.webp,.svg"}
-                        className="hidden"
-                        onChange={(e) => onUpload(a.kind, e.target.files?.[0])} />
-                      <Button type="button" variant="outline" size="sm"
-                        onClick={() => fileRefs[a.kind].current?.click()}
-                        disabled={uploading === a.kind}
-                        data-testid={`branding-upload-${a.kind}`}>
-                        <Upload size={12} className="mr-1.5" />
-                        {uploading === a.kind ? "Enviando..." : (url ? "Trocar" : "Enviar")}
-                      </Button>
-                      {url && (
-                        <Button type="button" variant="ghost" size="sm"
-                          onClick={() => setField(a.key, "")}
-                          data-testid={`branding-remove-${a.kind}`}>
-                          <Trash2 size={12} />
-                        </Button>
-                      )}
-                    </div>
-                  </div>
+        </TabsContent>
+
+        {/* Per-mode tabs */}
+        {MODES.map((m) => (
+          <TabsContent key={m.key} value={m.key} className="space-y-6">
+            <div className="border border-border bg-card rounded-sm p-4 flex items-start gap-3" data-testid={`branding-${m.key}-info`}>
+              <m.icon size={18} className="mt-0.5 text-muted-foreground" />
+              <div>
+                <div className="font-display font-semibold">Página de login do {m.label}</div>
+                <div className="text-xs text-muted-foreground">Personaliza apenas a tela <span className="font-mono">/{m.key === "agent" ? "login" : m.key}</span>. Deixe vazio para usar os valores globais.</div>
+              </div>
+            </div>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <section className="border border-border bg-card rounded-sm p-6" data-testid={`branding-${m.key}-texts`}>
+                <div className="flex items-center gap-2 mb-5"><Palette size={16} /><h2 className="font-display font-semibold text-lg">Textos & Cor</h2></div>
+                <div className="space-y-4">
+                  {MODE_FIELDS.map((f) => (
+                    <FieldRow key={f.key} f={f}
+                      value={form.modes[m.key]?.[f.key] ?? ""}
+                      onChange={(v) => setMode(m.key, f.key, v)}
+                      testid={`branding-${m.key}-${f.key}`} />
+                  ))}
                 </div>
-              );
-            })}
-          </div>
-        </section>
-      </div>
+              </section>
+              <section className="border border-border bg-card rounded-sm p-6" data-testid={`branding-${m.key}-assets`}>
+                <div className="flex items-center gap-2 mb-5"><ImageIcon size={16} /><h2 className="font-display font-semibold text-lg">Imagens</h2></div>
+                <div className="space-y-4">
+                  {MODE_ASSETS.map((a) => (
+                    <AssetRow key={a.key} a={a} url={form.modes[m.key]?.[a.key]}
+                      uploading={uploading === `${m.key}:${a.kind}`}
+                      onUpload={() => triggerUpload(m.key, a.key, a.kind)}
+                      onClear={() => setMode(m.key, a.key, "")} />
+                  ))}
+                </div>
+              </section>
+            </div>
+          </TabsContent>
+        ))}
+      </Tabs>
 
       <div className="mt-6 flex justify-end max-w-6xl">
         <Button onClick={save} disabled={saving} data-testid="branding-save">
@@ -188,5 +234,60 @@ export default function SiteBranding() {
         </Button>
       </div>
     </Layout>
+  );
+}
+
+function FieldRow({ f, value, onChange, testid }) {
+  return (
+    <div className="space-y-1.5">
+      <Label htmlFor={testid}>{f.label}</Label>
+      {f.long ? (
+        <Textarea id={testid} rows={2} placeholder={f.placeholder}
+          value={value} onChange={(e) => onChange(e.target.value)} data-testid={testid} />
+      ) : (
+        <Input id={testid} placeholder={f.placeholder}
+          value={value} onChange={(e) => onChange(e.target.value)} data-testid={testid} />
+      )}
+      <p className="text-[11px] text-muted-foreground">{f.hint}</p>
+    </div>
+  );
+}
+
+function AssetRow({ a, url, uploading, onUpload, onClear }) {
+  const isFav = a.kind === "favicon";
+  const isWall = a.kind === "wallpaper";
+  return (
+    <div className="border border-border rounded-sm p-3" data-testid={`branding-asset-row-${a.key}`}>
+      <div className="flex items-center justify-between gap-3 mb-3">
+        <div>
+          <div className="text-sm font-medium">{a.label}</div>
+          <div className="text-[11px] text-muted-foreground">{a.hint}</div>
+        </div>
+        <div className="text-[10px] uppercase tracking-widest text-muted-foreground">{a.ratio}</div>
+      </div>
+      <div className="flex items-center gap-3">
+        <div className={`shrink-0 border border-border rounded-sm bg-zinc-50 overflow-hidden flex items-center justify-center ${isWall ? "w-32 h-20" : isFav ? "w-12 h-12" : "w-16 h-16"}`}>
+          {url ? (
+            <img src={fullUrl(url)} alt={a.label} className={isWall ? "w-full h-full object-cover" : "w-full h-full object-contain"} />
+          ) : (
+            <ImageIcon size={isFav ? 16 : 20} className="text-zinc-300" />
+          )}
+        </div>
+        <div className="flex-1 flex items-center gap-2">
+          <Button type="button" variant="outline" size="sm" onClick={onUpload}
+            disabled={uploading} data-testid={`branding-upload-${a.key}`}>
+            <Upload size={12} className="mr-1.5" />
+            {uploading ? "Enviando..." : (url ? "Trocar" : "Enviar")}
+          </Button>
+          {url && (
+            <Button type="button" variant="ghost" size="sm"
+              onClick={onClear}
+              data-testid={`branding-remove-${a.key}`}>
+              <Trash2 size={12} />
+            </Button>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
