@@ -25,6 +25,7 @@ import Charges from "./pages/Charges";
 import FusionPBXSettings from "./pages/FusionPBXSettings";
 import SystemUpdate from "./pages/SystemUpdate";
 import SiteBranding from "./pages/SiteBranding";
+import SuperAdmins from "./pages/SuperAdmins";
 import VersionWatcher from "./components/VersionWatcher";
 import BrandingLoader from "./components/BrandingLoader";
 
@@ -56,6 +57,7 @@ function App() {
             <Route path="/fusionpbx" element={<ProtectedRoute hint="master"><FusionPBXSettings /></ProtectedRoute>} />
             <Route path="/system" element={<ProtectedRoute requireSuperAdmin hint="admin"><SystemUpdate /></ProtectedRoute>} />
             <Route path="/branding" element={<ProtectedRoute requireSuperAdmin hint="admin"><SiteBranding /></ProtectedRoute>} />
+            <Route path="/super-admins" element={<ProtectedRoute requireSuperAdmin hint="admin"><SuperAdmins /></ProtectedRoute>} />
           </Routes>
           <Toaster richColors position="top-right" />
         </BrowserRouter>

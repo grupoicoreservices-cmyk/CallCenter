@@ -886,6 +886,106 @@ async def delete_user(user_id: str, user: dict = Depends(require_permission("use
     await write_audit(user, "delete", "user", user_id, f"{target.get('name')} <{target.get('email')}>", {"role": target.get("role")})
     return {"ok": True}
 
+
+# ---------- Super-admin users (cross-tenant root accounts) ----------
+class SuperAdminCreate(BaseModel):
+    email: str
+    password: str
+    name: str
+    active: bool = True
+    @validator("email")
+    def _e(cls, v): return validate_email_str(v)
+
+
+class SuperAdminUpdate(BaseModel):
+    name: Optional[str] = None
+    password: Optional[str] = None
+    active: Optional[bool] = None
+
+
+@api.get("/super-admins")
+async def list_super_admins(user: dict = Depends(require_super_admin())):
+    docs = await db.users.find({"role": "super_admin"}, {"_id": 0, "password_hash": 0}).sort("created_at", 1).to_list(200)
+    return {"users": [_serialize_user(u) for u in docs]}
+
+
+@api.post("/super-admins")
+async def create_super_admin(body: SuperAdminCreate, user: dict = Depends(require_super_admin())):
+    email = body.email.lower()
+    if await db.users.find_one({"email": email, "role": "super_admin"}):
+        raise HTTPException(status_code=400, detail="Email já cadastrado como super admin")
+    if len(body.password) < 8:
+        raise HTTPException(status_code=400, detail="Senha mínima 8 caracteres")
+    doc = {
+        "id": str(uuid.uuid4()),
+        "tenant_id": None,
+        "email": email,
+        "name": body.name.strip() or email,
+        "role": "super_admin",
+        "permissions": None,
+        "active": bool(body.active),
+        "agent_id": None,
+        "password_hash": hash_password(body.password),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.users.insert_one(doc)
+    await write_audit(user, "create", "super_admin", doc["id"], f"{doc['name']} <{email}>", {"active": doc["active"]})
+    fresh = await db.users.find_one({"id": doc["id"]}, {"_id": 0, "password_hash": 0})
+    return _serialize_user(fresh)
+
+
+@api.put("/super-admins/{user_id}")
+async def update_super_admin(user_id: str, body: SuperAdminUpdate,
+                              user: dict = Depends(require_super_admin())):
+    target = await db.users.find_one({"id": user_id, "role": "super_admin"})
+    if not target:
+        raise HTTPException(status_code=404, detail="Super admin não encontrado")
+    update: Dict[str, Any] = {}
+    changes: Dict[str, Any] = {}
+    if body.name is not None and body.name != target.get("name"):
+        update["name"] = body.name.strip()
+        changes["name"] = {"from": target.get("name"), "to": body.name.strip()}
+    if body.password:
+        if len(body.password) < 8:
+            raise HTTPException(status_code=400, detail="Senha mínima 8 caracteres")
+        update["password_hash"] = hash_password(body.password)
+        changes["password"] = "changed"
+    if body.active is not None and body.active != target.get("active", True):
+        # Não permite desativar o último super admin ativo
+        if not body.active:
+            others_active = await db.users.count_documents(
+                {"role": "super_admin", "active": True, "id": {"$ne": user_id}})
+            if others_active == 0:
+                raise HTTPException(status_code=400,
+                    detail="Não é possível desativar o último super admin ativo")
+        update["active"] = body.active
+        changes["active"] = {"from": target.get("active", True), "to": body.active}
+    if update:
+        await db.users.update_one({"id": user_id}, {"$set": update})
+        await write_audit(user, "update", "super_admin", user_id,
+                           f"{target.get('name')} <{target.get('email')}>", changes)
+    fresh = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
+    return _serialize_user(fresh)
+
+
+@api.delete("/super-admins/{user_id}")
+async def delete_super_admin(user_id: str, user: dict = Depends(require_super_admin())):
+    if user["id"] == user_id:
+        raise HTTPException(status_code=400, detail="Você não pode excluir a si mesmo")
+    target = await db.users.find_one({"id": user_id, "role": "super_admin"})
+    if not target:
+        raise HTTPException(status_code=404, detail="Super admin não encontrado")
+    others_active = await db.users.count_documents(
+        {"role": "super_admin", "active": True, "id": {"$ne": user_id}})
+    if others_active == 0:
+        raise HTTPException(status_code=400,
+            detail="Não é possível remover o último super admin ativo")
+    await db.users.delete_one({"id": user_id})
+    await write_audit(user, "delete", "super_admin", user_id,
+                       f"{target.get('name')} <{target.get('email')}>", {})
+    return {"ok": True}
+
+
 @api.get("/audit-logs")
 async def list_audit_logs(
     user: dict = Depends(require_permission("users.manage")),
