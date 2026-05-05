@@ -794,6 +794,7 @@ def fmt_br_datetime(iso: Optional[str]) -> str:
 @api.get("/dashboard/stats")
 async def dashboard_stats(user: dict = Depends(require_permission("dashboard.view"))):
     f = tenant_filter(user)
+    tid = tenant_scope(user)
     total_agents = await db.agents.count_documents(f)
     online_agents = await db.agents.count_documents({**f, "status": {"$in": ["online", "incall", "paused"]}})
     incall = await db.agents.count_documents({**f, "status": "incall"})
@@ -803,6 +804,44 @@ async def dashboard_stats(user: dict = Depends(require_permission("dashboard.vie
     queues = await db.queues.find(f, {"_id": 0}).to_list(50)
     waiting = sum(q.get("waiting", 0) for q in queues)
     avg_wait = int(sum(q.get("avg_wait_sec", 0) for q in queues) / max(len(queues), 1))
+    # Live waiting via ESL (overrides cached if available)
+    if tid:
+        s = await db.fusionpbx_settings.find_one({"tenant_id": tid})
+        if s and s.get("enabled") and s.get("esl_host"):
+            try:
+                esl = FreeSwitchESL(host=s["esl_host"], port=int(s.get("esl_port") or 8021),
+                                    password=s.get("esl_password") or "ClueCon",
+                                    timeout=float(s.get("esl_timeout") or 5.0))
+                rows = await esl.show_channels()
+                queue_exts = {q.get("extension"): q for q in queues if q.get("extension")}
+                live_waiting = 0
+                live_incall_exts = set()
+                rows_by_uuid = {(r.get("uuid") or ""): r for r in (rows or [])}
+                child_uuids = set()
+                for r in (rows or []):
+                    bu = r.get("b_uuid") or ""
+                    if bu in rows_by_uuid: child_uuids.add(bu)
+                for r in (rows or []):
+                    if (r.get("uuid") or "") in child_uuids: continue
+                    dest = str(r.get("dest") or "")
+                    state = (r.get("callstate") or "").upper()
+                    # Em fila = destino bate com queue.extension e ainda não foi bridged (sem b_uuid)
+                    if dest in queue_exts and not r.get("b_uuid"):
+                        live_waiting += 1
+                # Atualiza waiting nas filas (in-memory, não persiste)
+                queue_waiting = {qext: 0 for qext in queue_exts}
+                for r in (rows or []):
+                    if (r.get("uuid") or "") in child_uuids: continue
+                    dest = str(r.get("dest") or "")
+                    if dest in queue_waiting and not r.get("b_uuid"):
+                        queue_waiting[dest] += 1
+                # Persiste contagem ao vivo nas filas
+                for ext, count in queue_waiting.items():
+                    q = queue_exts[ext]
+                    await db.queues.update_one({"id": q["id"]}, {"$set": {"waiting": count}})
+                waiting = live_waiting
+            except Exception as e:
+                logger.warning("dashboard: ESL waiting probe falhou: %s", e)
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=23)).isoformat()
     cur = db.calls.find({**f, "started_at": {"$gte": cutoff}}, {"_id": 0, "started_at": 1, "disposition": 1})
     buckets = {h: {"hour": f"{h:02d}h", "answered": 0, "missed": 0} for h in range(24)}
@@ -2503,6 +2542,15 @@ async def _run_sync_for_tenant(tid: str, cdr_limit: int = 200) -> Dict[str, Any]
         except ClientErr as e2:
             summary["errors"].append(f"agents: {e} | extensions: {e2}")
     summary["agent_source"] = agent_source
+    # Quando temos call_center_agents reais, removemos os ramais (source=extension) sincronizados antes
+    if agent_source == "call_center_agent" and agent_records:
+        del_res = await db.agents.delete_many({
+            "tenant_id": tid, "source": "extension", "external_id": {"$ne": None},
+        })
+        if del_res.deleted_count > 0:
+            summary["legacy_extensions_removed"] = del_res.deleted_count
+            logger.info("[sync] Removidos %d ramais antigos (substituídos por agentes CCA)",
+                        del_res.deleted_count)
     # Map FusionPBX agent_status → Voxyra status
     def _map_status(pbx_status: Optional[str]) -> Optional[str]:
         if not pbx_status: return None
