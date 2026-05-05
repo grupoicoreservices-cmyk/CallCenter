@@ -1493,7 +1493,10 @@ class QueueSelectionReq(BaseModel):
 
 @api.post("/agents/me/queues/select")
 async def select_my_queues(body: QueueSelectionReq, user: dict = Depends(get_current_user)):
-    """Agent chooses in which of their assigned queues they want to receive calls."""
+    """Agent chooses queues to actively log into.
+    This adds/removes tiers (agent↔queue) in FusionPBX PostgreSQL so the
+    distributor only rings selected queues. Falls back to local-only when
+    PBX update is unavailable (read-only or non-DB integration)."""
     if user.get("role") != "agent":
         raise HTTPException(status_code=403, detail="Apenas agentes")
     aid = user.get("agent_id")
@@ -1503,18 +1506,58 @@ async def select_my_queues(body: QueueSelectionReq, user: dict = Depends(get_cur
     me = await db.agents.find_one({"id": aid, "tenant_id": tid}, {"_id": 0})
     if not me:
         raise HTTPException(status_code=404, detail="Agente não encontrado")
-    allowed = set(me.get("queues") or [])
-    chosen = [qid for qid in (body.queue_ids or []) if qid in allowed]
-    if not chosen:
+    allowed_ids = set(me.get("queues") or [])
+    chosen_ids = [qid for qid in (body.queue_ids or []) if qid in allowed_ids]
+    if not chosen_ids:
         raise HTTPException(status_code=400, detail="Selecione ao menos uma fila autorizada")
+
+    # Resolve queue PBX uuids
+    queues = await db.queues.find(
+        {"tenant_id": tid, "id": {"$in": list(allowed_ids)}}, {"_id": 0}).to_list(50)
+    qmap = {q["id"]: q for q in queues}
+    chosen_uuids = {qmap[q].get("external_id") for q in chosen_ids if qmap.get(q) and qmap[q].get("external_id")}
+    all_uuids   = {qmap[q].get("external_id") for q in allowed_ids if qmap.get(q) and qmap[q].get("external_id")}
+    to_remove = list(all_uuids - chosen_uuids)
+
+    pbx_added: List[str] = []
+    pbx_removed: List[str] = []
+    pbx_errors: List[str] = []
+    s = await db.fusionpbx_settings.find_one({"tenant_id": tid}) or {}
+    if s.get("connection_type") == "db" and s.get("db_host") and me.get("external_id"):
+        try:
+            client = FusionPBXDBClient(
+                host=s["db_host"], port=int(s.get("db_port") or 5432),
+                database=s.get("db_name") or "fusionpbx",
+                username=s["db_username"], password=s.get("db_password") or "",
+                domain_uuid=s.get("domain_uuid"), ssl=bool(s.get("db_ssl")),
+            )
+            for quuid in chosen_uuids:
+                try:
+                    await client.assign_agent_to_queue(me["external_id"], quuid)
+                    pbx_added.append(quuid)
+                except FusionPBXDBError as e:
+                    pbx_errors.append(f"add {quuid[:8]}: {e}")
+            for quuid in to_remove:
+                try:
+                    ok = await client.remove_agent_from_queue(me["external_id"], quuid)
+                    if ok:
+                        pbx_removed.append(quuid)
+                except FusionPBXDBError as e:
+                    pbx_errors.append(f"remove {quuid[:8]}: {e}")
+        except Exception as e:
+            pbx_errors.append(str(e))
+
     await db.agents.update_one(
         {"id": aid},
-        {"$set": {"active_queues": chosen,
+        {"$set": {"active_queues": chosen_ids,
                   "active_queues_changed_at": datetime.now(timezone.utc).isoformat()}})
     await write_audit(user, "update", "agent_queues", aid,
-                       f"{me.get('name')} ativou {len(chosen)} fila(s)",
-                       {"active_queues": chosen})
-    return {"ok": True, "active_queues": chosen}
+                       f"{me.get('name')} ativou {len(chosen_ids)} fila(s)",
+                       {"active_queues": chosen_ids,
+                        "pbx_added": len(pbx_added), "pbx_removed": len(pbx_removed)})
+    return {"ok": True, "active_queues": chosen_ids,
+            "pbx_added": pbx_added, "pbx_removed": pbx_removed,
+            "pbx_errors": pbx_errors}
 
 
 @api.get("/agents/me/queue-status")

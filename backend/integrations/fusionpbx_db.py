@@ -462,6 +462,55 @@ class FusionPBXDBClient:
         finally:
             await conn.close()
 
+    async def remove_agent_from_queue(self, agent_uuid: str, queue_uuid: str) -> bool:
+        """Remove a tier (agente↔fila) de v_call_center_tiers."""
+        conn = await self._connect()
+        try:
+            tbl = await conn.fetchval(
+                "SELECT to_regclass('public.v_call_center_tiers')::text"
+            )
+            if not tbl:
+                return False
+            res = await conn.execute(
+                """DELETE FROM v_call_center_tiers
+                   WHERE call_center_queue_uuid = $1::uuid
+                     AND call_center_agent_uuid = $2::uuid
+                     AND domain_uuid = $3::uuid""",
+                queue_uuid, agent_uuid, self.domain_uuid,
+            )
+            # res like 'DELETE 1' or 'DELETE 0'
+            return res.endswith("1") or res.split()[-1].isdigit() and int(res.split()[-1]) > 0
+        except Exception as e:
+            raise FusionPBXDBError(
+                f"Falha remove_agent_from_queue [{type(e).__name__}]: {e}"
+            ) from e
+        finally:
+            await conn.close()
+
+    async def list_agent_tiers(self, agent_uuid: str) -> List[Dict[str, Any]]:
+        """Lista os tiers (queues) onde o agente está vinculado no PBX."""
+        conn = await self._connect()
+        try:
+            tbl = await conn.fetchval(
+                "SELECT to_regclass('public.v_call_center_tiers')::text"
+            )
+            if not tbl:
+                return []
+            rows = await conn.fetch(
+                """SELECT t.call_center_queue_uuid::text AS queue_uuid,
+                          q.queue_name, q.queue_extension,
+                          t.tier_level, t.tier_position
+                   FROM v_call_center_tiers t
+                   JOIN v_call_center_queues q
+                     ON q.call_center_queue_uuid = t.call_center_queue_uuid
+                   WHERE t.call_center_agent_uuid = $1::uuid
+                     AND t.domain_uuid = $2::uuid""",
+                agent_uuid, self.domain_uuid,
+            )
+            return [dict(r) for r in rows]
+        finally:
+            await conn.close()
+
     async def update_agent_status(self, agent_uuid: str, status: str) -> None:
         """Update agent status in v_call_center_agents.
         Different FusionPBX versions use different column names: agent_status / state / status."""
