@@ -501,6 +501,37 @@ class FusionPBXDBClient:
         finally:
             await conn.close()
 
+    async def update_agent_contact(self, agent_uuid: str, extension: str,
+                                   domain_name: str) -> str:
+        """Update agent_contact (ramal) so calls ring on the chosen extension.
+        Returns the new contact string written to the DB.
+        """
+        if not self.domain_uuid:
+            raise FusionPBXDBError("domain_uuid obrigatório")
+        ext = (extension or "").strip()
+        if not ext.isdigit():
+            raise FusionPBXDBError("Ramal inválido (apenas dígitos)")
+        # FusionPBX commonly stores callback contact like:
+        #   {sip_h_X-accountcode=ext}user/<ext>@<domain>
+        # We use the simpler universally-accepted form:
+        new_contact = f"user/{ext}@{domain_name}"
+        conn = await self._connect()
+        try:
+            await conn.execute(
+                """UPDATE v_call_center_agents
+                   SET agent_contact = $1
+                   WHERE call_center_agent_uuid = $2::uuid
+                     AND domain_uuid = $3::uuid""",
+                new_contact, agent_uuid, self.domain_uuid,
+            )
+            return new_contact
+        except Exception as e:
+            raise FusionPBXDBError(
+                f"Falha update_agent_contact [{type(e).__name__}]: {e}"
+            ) from e
+        finally:
+            await conn.close()
+
     async def delete_queue(self, queue_uuid: str) -> None:
         conn = await self._connect()
         try:

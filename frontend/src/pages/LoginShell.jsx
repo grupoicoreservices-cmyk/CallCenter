@@ -18,12 +18,14 @@ export default function LoginShell({ mode = "agent" }) {
   const navigate = useNavigate();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [extension, setExtension] = useState(() => localStorage.getItem("agent_extension") || "");
   const [branding, setBranding] = useState(null);
   const [site, setSite] = useState(null);
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(false);
 
   const isAdmin = mode === "admin";
+  const isAgent = mode === "agent";
   const allowedRoles =
     mode === "agent" ? ["agent"]
     : mode === "master" ? ["admin", "supervisor"]
@@ -85,18 +87,40 @@ export default function LoginShell({ mode = "agent" }) {
   async function onSubmit(e) {
     e.preventDefault();
     setErr(""); setLoading(true);
+    if (isAgent) {
+      const ext = extension.trim();
+      if (!/^[0-9]{2,8}$/.test(ext)) {
+        setErr("Informe um ramal válido (apenas dígitos, 2 a 8 caracteres)");
+        setLoading(false);
+        return;
+      }
+    }
     // Backend extrai domínio automaticamente quando vazio
     const r = await login("", email, password);
-    setLoading(false);
-    if (!r.ok) { setErr(r.error); return; }
+    if (!r.ok) { setLoading(false); setErr(r.error); return; }
     if (!allowedRoles.includes(r.role)) {
       await logout();
       const where = r.role === "super_admin" ? "/admin"
                   : (r.role === "admin" || r.role === "supervisor") ? "/master"
                   : "/login";
+      setLoading(false);
       setErr(`Esta conta tem perfil "${r.role}". Use a página correta: ${where}`);
       return;
     }
+    // Agent: send extension to backend so calls ring on the chosen ramal
+    if (isAgent && r.role === "agent") {
+      try {
+        await api.put("/agents/me/extension", { extension: extension.trim() });
+        localStorage.setItem("agent_extension", extension.trim());
+      } catch (e) {
+        await logout();
+        setLoading(false);
+        const msg = e?.response?.data?.detail || "Falha ao registrar ramal";
+        setErr(typeof msg === "string" ? msg : JSON.stringify(msg));
+        return;
+      }
+    }
+    setLoading(false);
     if (r.role === "super_admin") navigate("/tenants");
     else if (r.role === "agent") navigate("/agent");
     else navigate("/");
@@ -196,6 +220,18 @@ export default function LoginShell({ mode = "agent" }) {
               <Input id="pw" type="password" value={password} onChange={(e) => setPassword(e.target.value)}
                 required data-testid={`login-${mode}-password`} autoComplete="current-password" />
             </div>
+            {isAgent && (
+              <div className="space-y-1.5">
+                <Label htmlFor="ramal">Ramal</Label>
+                <Input id="ramal" type="text" inputMode="numeric" pattern="[0-9]*"
+                  value={extension} onChange={(e) => setExtension(e.target.value.replace(/\D/g, ""))}
+                  required maxLength={8} placeholder="Ex: 1001"
+                  data-testid={`login-${mode}-extension`} autoComplete="off" />
+                <p className="text-[11px] text-muted-foreground">
+                  As chamadas atribuídas a você tocarão neste ramal durante esta sessão.
+                </p>
+              </div>
+            )}
             {err && (
               <div className="text-sm text-red-700 bg-red-50 border border-red-200 px-3 py-2 rounded"
                    data-testid={`login-${mode}-error`}>{err}</div>

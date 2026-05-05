@@ -1311,6 +1311,56 @@ async def get_my_agent(user: dict = Depends(get_current_user)):
     return {"agent": agent}
 
 
+class ExtensionReq(BaseModel):
+    extension: str
+
+@api.put("/agents/me/extension")
+async def set_my_extension(body: ExtensionReq, user: dict = Depends(get_current_user)):
+    """Agent updates the extension where calls should ring (FusionPBX agent_contact).
+    Persists the new extension on the local agent doc and pushes user/<ext>@<domain>
+    to v_call_center_agents.agent_contact.
+    """
+    if user.get("role") != "agent":
+        raise HTTPException(status_code=403, detail="Apenas agentes")
+    aid = user.get("agent_id")
+    if not aid:
+        raise HTTPException(status_code=404, detail="Usuário não vinculado a agente")
+    ext = (body.extension or "").strip()
+    if not ext.isdigit() or not (2 <= len(ext) <= 8):
+        raise HTTPException(status_code=400, detail="Ramal inválido (use somente dígitos, 2 a 8 caracteres)")
+    tid = user.get("tenant_id")
+    agent = await db.agents.find_one({"id": aid, "tenant_id": tid}, {"_id": 0})
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agente não encontrado")
+    s = await db.fusionpbx_settings.find_one({"tenant_id": tid})
+    pbx_synced = False
+    pbx_error = None
+    new_contact = None
+    if s and s.get("connection_type") == "db" and s.get("db_host") and agent.get("external_id"):
+        try:
+            client = FusionPBXDBClient(
+                host=s["db_host"], port=int(s.get("db_port") or 5432),
+                database=s.get("db_name") or "fusionpbx",
+                username=s["db_username"], password=s.get("db_password") or "",
+                domain_uuid=s.get("domain_uuid"), ssl=bool(s.get("db_ssl")),
+            )
+            new_contact = await client.update_agent_contact(
+                agent["external_id"], ext, s.get("domain_name") or "")
+            pbx_synced = True
+        except FusionPBXDBError as e:
+            pbx_error = str(e)
+            logger.warning("set_my_extension PBX falhou: %s", e)
+    await db.agents.update_one(
+        {"id": aid}, {"$set": {"extension": ext,
+                                "agent_contact": new_contact,
+                                "extension_changed_at": datetime.now(timezone.utc).isoformat()}})
+    await write_audit(user, "update", "agent_extension", aid,
+                       f"{agent.get('name')} ramal → {ext}",
+                       {"extension": ext, "pbx_synced": pbx_synced})
+    return {"ok": True, "extension": ext, "agent_contact": new_contact,
+            "pbx_synced": pbx_synced, "pbx_error": pbx_error}
+
+
 @api.get("/queues")
 async def list_queues(user: dict = Depends(require_permission("queues.view"))):
     f = tenant_filter(user)
