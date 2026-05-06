@@ -51,6 +51,37 @@ async def _pbx_reload_callcenter(tid: str) -> None:
     except Exception as e:
         logger.warning("callcenter_reload falhou: %s", e)
 
+
+async def _pbx_apply_agent_live(tid: str, agent_name: str, *,
+                                  status: Optional[str] = None,
+                                  state: Optional[str] = None,
+                                  contact: Optional[str] = None) -> Dict[str, Any]:
+    """Apply changes directly into mod_callcenter MEMORY (live distributor).
+    DB UPDATE persists; this command makes mod_callcenter actually use it now.
+    """
+    out = {"status": None, "state": None, "contact": None, "errors": []}
+    try:
+        s = await db.fusionpbx_settings.find_one({"tenant_id": tid}) or {}
+        if not (s.get("enabled") and s.get("esl_host") and agent_name):
+            return out
+        esl = FreeSwitchESL(
+            host=s["esl_host"], port=int(s.get("esl_port") or 8021),
+            password=s.get("esl_password") or "ClueCon",
+            timeout=float(s.get("esl_timeout") or 5.0),
+        )
+        if contact is not None:
+            try: out["contact"] = await esl.callcenter_agent_set(agent_name, "contact", contact)
+            except Exception as e: out["errors"].append(f"contact: {e}")
+        if status is not None:
+            try: out["status"] = await esl.callcenter_agent_set(agent_name, "status", status)
+            except Exception as e: out["errors"].append(f"status: {e}")
+        if state is not None:
+            try: out["state"] = await esl.callcenter_agent_set(agent_name, "state", state)
+            except Exception as e: out["errors"].append(f"state: {e}")
+    except Exception as e:
+        out["errors"].append(str(e))
+    return out
+
 EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
 
 def validate_email_str(v: str) -> str:
@@ -1620,6 +1651,11 @@ async def set_my_extension(body: ExtensionReq, user: dict = Depends(get_current_
                                 "extension_changed_at": datetime.now(timezone.utc).isoformat()}})
     if pbx_synced:
         await _pbx_reload_callcenter(tid)
+        # Aplicar status/contact em memória do mod_callcenter (live)
+        await _pbx_apply_agent_live(
+            tid, agent.get("name") or "",
+            status="Available", state="Waiting", contact=new_contact,
+        )
     await write_audit(user, "update", "agent_extension", aid,
                        f"{agent.get('name')} ramal → {ext}",
                        {"extension": ext, "pbx_synced": pbx_synced})
@@ -1687,6 +1723,10 @@ async def agent_logout(request: Request):
                    "logout_at": datetime.now(timezone.utc).isoformat()}})
     if pbx_logged_out or tiers_removed:
         await _pbx_reload_callcenter(tid)
+        await _pbx_apply_agent_live(
+            tid, agent.get("name") or "",
+            status="Logged Out", state="Idle",
+        )
     await write_audit(user, "logout", "agent", aid,
                        f"{agent.get('name')} desconectou",
                        {"tiers_removed": tiers_removed, "pbx_logged_out": pbx_logged_out})

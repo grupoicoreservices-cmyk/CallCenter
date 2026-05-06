@@ -162,6 +162,26 @@ class FreeSwitchESL:
                 return out
         return "reload failed"
 
+    async def callcenter_agent_set(self, agent_name: str, field: str, value: str) -> str:
+        """Update an agent property in mod_callcenter MEMORY (live).
+        field: status | state | contact | type | wrap_up_time | reject_delay_time |
+               busy_delay_time | no_answer_delay_time | max_no_answer
+        Examples:
+          set status 'Neto' 'Available'
+          set state  'Neto' 'Waiting'
+          set contact 'Neto' 'user/9165@grupoicore...'"""
+        cmd = f"callcenter_config agent set {field} '{agent_name}' '{value}'"
+        return await self.api(cmd)
+
+    async def callcenter_tier_add(self, queue_name: str, agent_name: str,
+                                   level: int = 1, position: int = 1) -> str:
+        return await self.api(
+            f"callcenter_config tier add {queue_name} {agent_name} {level} {position}")
+
+    async def callcenter_tier_del(self, queue_name: str, agent_name: str) -> str:
+        return await self.api(
+            f"callcenter_config tier del {queue_name} {agent_name}")
+
 
 def normalize_esl_channel(c: Dict[str, Any]) -> Dict[str, Any]:
     """Map a row from 'show channels as json' to our internal shape."""
