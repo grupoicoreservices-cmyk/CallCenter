@@ -5,7 +5,7 @@ Just a read-only PostgreSQL user accessing the FusionPBX database directly.
 """
 from __future__ import annotations
 import logging
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 import asyncpg
 
 logger = logging.getLogger(__name__)
@@ -263,7 +263,8 @@ class FusionPBXDBClient:
                                   caller_id_name: str, caller_id_number: str = "",
                                   voicemail_password: Optional[str] = None,
                                   description: str = "") -> Dict[str, Any]:
-        """Cria um ramal SIP (v_extensions). Senha SIP em texto puro (FusionPBX usa internamente)."""
+        """Cria um ramal SIP (v_extensions). Auto-detecta as colunas presentes
+        para compatibilidade entre versões do FusionPBX."""
         if not self.domain_uuid:
             raise FusionPBXDBError("domain_uuid obrigatório")
         import uuid as _uuid
@@ -277,19 +278,45 @@ class FusionPBXDBClient:
             )
             if dup:
                 raise FusionPBXDBError(f"Ramal {extension} já existe neste domínio")
-            await conn.execute(
-                """INSERT INTO v_extensions
-                   (extension_uuid, domain_uuid, extension, password,
-                    effective_caller_id_name, effective_caller_id_number,
-                    outbound_caller_id_name, outbound_caller_id_number,
-                    voicemail_password, voicemail_enabled, enabled, description,
-                    insert_date, insert_user)
-                   VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $5, $6, $7,
-                           'true', 'true', $8, NOW(), $1::uuid)""",
-                new_uuid, self.domain_uuid, str(extension), sip_password,
-                caller_id_name, caller_id_number or str(extension),
-                voicemail_password or str(extension), description,
+            cols_rows = await conn.fetch(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name='v_extensions'"
             )
+            cols = {r["column_name"] for r in cols_rows}
+            # Build column/value pairs only for columns that exist.
+            field_map: List[Tuple[str, Any]] = [
+                ("extension_uuid", new_uuid),
+                ("domain_uuid", self.domain_uuid),
+                ("extension", str(extension)),
+                ("password", sip_password),
+                ("effective_caller_id_name", caller_id_name),
+                ("effective_caller_id_number", caller_id_number or str(extension)),
+                ("outbound_caller_id_name", caller_id_name),
+                ("outbound_caller_id_number", caller_id_number or str(extension)),
+                ("voicemail_password", voicemail_password or str(extension)),
+                ("voicemail_enabled", "true"),
+                ("enabled", "true"),
+                ("description", description),
+                ("insert_user", new_uuid),
+            ]
+            present = [(c, v) for (c, v) in field_map if c in cols]
+            placeholders = []
+            values = []
+            cast_cols = {"extension_uuid", "domain_uuid", "insert_user"}
+            for i, (c, v) in enumerate(present, start=1):
+                ph = f"${i}::uuid" if c in cast_cols else f"${i}"
+                placeholders.append(ph)
+                values.append(v)
+            cols_sql = ", ".join(c for c, _ in present)
+            extras = []
+            if "insert_date" in cols:
+                cols_sql += ", insert_date"
+                placeholders.append("NOW()")
+            sql = (
+                f"INSERT INTO v_extensions ({cols_sql}) "
+                f"VALUES ({', '.join(placeholders)})"
+            )
+            await conn.execute(sql, *values)
             return {"extension_uuid": new_uuid, "extension": str(extension),
                     "caller_id_name": caller_id_name}
         except FusionPBXDBError:
@@ -317,6 +344,40 @@ class FusionPBXDBClient:
             raise FusionPBXDBError(f"Falha update_extension_password [{type(e).__name__}]: {e}") from e
         finally:
             await conn.close()
+
+    async def list_extensions(self) -> List[Dict[str, Any]]:
+        """Lista ramais (v_extensions) do domínio configurado."""
+        if not self.domain_uuid:
+            return []
+        conn = await self._connect()
+        try:
+            rows = await conn.fetch(
+                """SELECT extension_uuid::text AS uuid,
+                          extension,
+                          number_alias,
+                          effective_caller_id_name AS caller_id_name,
+                          effective_caller_id_number AS caller_id_number,
+                          enabled,
+                          description,
+                          user_context
+                   FROM v_extensions
+                   WHERE domain_uuid = $1::uuid
+                   ORDER BY extension::int""",
+                self.domain_uuid,
+            )
+            return [dict(r) for r in rows]
+        except Exception as e:
+            raise FusionPBXDBError(f"Falha list_extensions [{type(e).__name__}]: {e}") from e
+        finally:
+            await conn.close()
+
+    async def get_extension_registrations(self, ext_list: List[str]) -> Dict[str, bool]:
+        """Verifica se ramais estão registrados via tabela registrations
+        (FusionPBX mantém em sip_registrations / v_extensions com registered)."""
+        # Implementação simples: marca todos como False (não temos acesso à tabela
+        # de registros via PostgreSQL — registros são em memória do FreeSWITCH).
+        # O endpoint dedicado usa ESL para checar status real.
+        return {ext: False for ext in ext_list}
 
     async def provision_user(self, username: str, password_hash: str,
                              contact: str = "") -> Dict[str, Any]:

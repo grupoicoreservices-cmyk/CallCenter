@@ -1,7 +1,7 @@
 import { NavLink, useNavigate } from "react-router-dom";
 import { useEffect, useState } from "react";
 import {
-  LayoutDashboard, PhoneCall, Disc3, BarChart3, Users, UserCog, LogOut, Headphones,
+  LayoutDashboard, PhoneCall, Phone, Disc3, BarChart3, Users, UserCog, LogOut, Headphones,
   Tv2, ShieldCheck, History, Building2, X, Sparkles, CreditCard, Receipt, Server, Download, Palette, Crown,
 } from "lucide-react";
 import { api } from "../lib/api";
@@ -15,6 +15,7 @@ const ITEMS = [
   { to: "/reports", label: "Relatórios", icon: BarChart3, testid: "nav-reports", perm: "reports.view" },
   { to: "/queues", label: "Filas", icon: Users, testid: "nav-queues", perm: "queues.view" },
   { to: "/agents", label: "Agentes", icon: UserCog, testid: "nav-agents", perm: "agents.view" },
+  { to: "/extensions", label: "Ramais", icon: Phone, testid: "nav-extensions", perm: "agents.view" },
   { to: "/tv", label: "Painel TV", icon: Tv2, testid: "nav-tv", perm: "tv.view" },
   { to: "/users", label: "Usuários", icon: ShieldCheck, testid: "nav-users", perm: "users.manage" },
   { to: "/audit", label: "Auditoria", icon: History, testid: "nav-audit", perm: "users.manage" },

@@ -16,6 +16,7 @@ import Recordings from "./pages/Recordings";
 import Reports from "./pages/Reports";
 import Queues from "./pages/Queues";
 import Agents from "./pages/Agents";
+import Extensions from "./pages/Extensions";
 import TvPanel from "./pages/TvPanel";
 import Users from "./pages/Users";
 import AuditLogs from "./pages/AuditLogs";
@@ -49,6 +50,7 @@ function App() {
             <Route path="/reports" element={<ProtectedRoute hint="master"><Reports /></ProtectedRoute>} />
             <Route path="/queues" element={<ProtectedRoute hint="master"><Queues /></ProtectedRoute>} />
             <Route path="/agents" element={<ProtectedRoute hint="master"><Agents /></ProtectedRoute>} />
+            <Route path="/extensions" element={<ProtectedRoute hint="master"><Extensions /></ProtectedRoute>} />
             <Route path="/tv" element={<ProtectedRoute hint="master"><TvPanel /></ProtectedRoute>} />
             <Route path="/users" element={<ProtectedRoute hint="master"><Users /></ProtectedRoute>} />
             <Route path="/audit" element={<ProtectedRoute hint="master"><AuditLogs /></ProtectedRoute>} />

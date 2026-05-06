@@ -1561,6 +1561,70 @@ async def pbx_resync_agent(agent_id: str,
     return {"ok": True, **result}
 
 
+@api.get("/extensions")
+async def list_extensions(user: dict = Depends(get_current_user)):
+    """Lista ramais SIP do FusionPBX (v_extensions). Lê em tempo real do
+    PostgreSQL do PBX para evitar dessync com a tela de cadastro de agentes."""
+    tid = user.get("tenant_id")
+    if user.get("role") == "super_admin":
+        # Super admin pode passar tenant_id via query (futuro). Por ora usa o
+        # contexto ativo do localStorage; sem contexto retorna vazio.
+        ctx = user.get("active_tenant_id") or tid
+        tid = ctx
+    if not tid:
+        return {"extensions": [], "registrations": {}}
+    s = await db.fusionpbx_settings.find_one({"tenant_id": tid}) or {}
+    if not (s.get("connection_type") == "db" and s.get("db_host")):
+        return {"extensions": [], "registrations": {},
+                "warning": "FusionPBX não configurado via PostgreSQL"}
+    try:
+        client = FusionPBXDBClient(
+            host=s["db_host"], port=int(s.get("db_port") or 5432),
+            database=s.get("db_name") or "fusionpbx",
+            username=s["db_username"], password=s.get("db_password") or "",
+            domain_uuid=s.get("domain_uuid"), ssl=bool(s.get("db_ssl")),
+        )
+        exts = await client.list_extensions()
+    except FusionPBXDBError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    # Registrations via ESL (best-effort)
+    regs: Dict[str, bool] = {}
+    try:
+        if s.get("enabled") and s.get("esl_host"):
+            esl = FreeSwitchESL(
+                host=s["esl_host"], port=int(s.get("esl_port") or 8021),
+                password=s.get("esl_password") or "ClueCon",
+                timeout=float(s.get("esl_timeout") or 5.0),
+            )
+            out = await esl.api("sofia status profile internal reg")
+            for line in (out or "").splitlines():
+                if "User:" in line:
+                    user_part = line.split("User:")[1].strip()
+                    ext = user_part.split("@")[0]
+                    regs[ext] = True
+    except Exception as e:
+        logger.warning("list_extensions: ESL regs falhou: %s", e)
+    # Mark which agents are linked
+    agents = await db.agents.find(
+        {"tenant_id": tid, "extension": {"$ne": None}},
+        {"_id": 0, "extension": 1, "name": 1}).to_list(500)
+    agent_by_ext = {str(a.get("extension")): a.get("name") for a in agents if a.get("extension")}
+    out = []
+    for e in exts:
+        ext = str(e.get("extension") or "")
+        out.append({
+            "uuid": e.get("uuid"),
+            "extension": ext,
+            "caller_id_name": e.get("caller_id_name"),
+            "caller_id_number": e.get("caller_id_number"),
+            "enabled": e.get("enabled") == "true" or e.get("enabled") is True,
+            "description": e.get("description"),
+            "registered": bool(regs.get(ext)),
+            "agent_name": agent_by_ext.get(ext),
+        })
+    return {"extensions": out}
+
+
 @api.get("/agents/{agent_id}/linked-user")
 async def get_agent_linked_user(agent_id: str,
                                   user: dict = Depends(require_permission("agents.edit"))):
