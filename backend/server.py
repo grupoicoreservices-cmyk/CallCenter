@@ -1593,33 +1593,47 @@ async def pbx_resync_agent(agent_id: str,
 @api.get("/extensions")
 async def list_extensions(user: dict = Depends(get_current_user)):
     """Lista ramais SIP do FusionPBX (v_extensions). Lê em tempo real do
-    PostgreSQL do PBX para evitar dessync com a tela de cadastro de agentes."""
-    tid = user.get("tenant_id")
-    if user.get("role") == "super_admin":
-        # Super admin pode passar tenant_id via query (futuro). Por ora usa o
-        # contexto ativo do localStorage; sem contexto retorna vazio.
-        ctx = user.get("active_tenant_id") or tid
-        tid = ctx
+    FusionPBX via PostgreSQL (preferido) ou REST, respeitando a
+    configuração do tenant em fusionpbx_settings."""
+    tid = tenant_scope(user)
     if not tid:
         return {"extensions": [], "registrations": {}}
     s = await db.fusionpbx_settings.find_one({"tenant_id": tid}) or {}
-    if not (s.get("connection_type") == "db" and s.get("db_host")):
+    if not s.get("enabled"):
         return {"extensions": [], "registrations": {},
-                "warning": "FusionPBX não configurado via PostgreSQL"}
+                "warning": "Integração FusionPBX desabilitada para este tenant"}
+    ctype = s.get("connection_type") or "rest"
     try:
-        client = FusionPBXDBClient(
-            host=s["db_host"], port=int(s.get("db_port") or 5432),
-            database=s.get("db_name") or "fusionpbx",
-            username=s["db_username"], password=s.get("db_password") or "",
-            domain_uuid=s.get("domain_uuid"), ssl=bool(s.get("db_ssl")),
-        )
-        exts = await client.list_extensions()
-    except FusionPBXDBError as e:
+        if ctype == "db":
+            if not s.get("db_host") or not s.get("db_username"):
+                return {"extensions": [], "registrations": {},
+                        "warning": "FusionPBX PostgreSQL não configurado"}
+            client = FusionPBXDBClient(
+                host=s["db_host"], port=int(s.get("db_port") or 5432),
+                database=s.get("db_name") or "fusionpbx",
+                username=s["db_username"], password=s.get("db_password") or "",
+                domain_uuid=s.get("domain_uuid"), ssl=bool(s.get("db_ssl")),
+            )
+            exts = await client.list_extensions()
+        else:
+            if not s.get("base_url"):
+                return {"extensions": [], "registrations": {},
+                        "warning": "FusionPBX REST não configurado"}
+            custom_paths = {k.replace("path_", ""): s[k] for k in ("path_extensions",) if s.get(k)}
+            client = FusionPBXClient(
+                base_url=s["base_url"], api_key=s.get("api_key"),
+                username=s.get("username"), password=s.get("password"),
+                domain_uuid=s.get("domain_uuid"), domain_name=s.get("domain_name"),
+                verify_ssl=bool(s.get("verify_ssl", True)),
+                custom_paths=custom_paths,
+            )
+            exts = await client.list_extensions()
+    except (FusionPBXDBError, FusionPBXError) as e:
         raise HTTPException(status_code=502, detail=str(e))
     # Registrations via ESL (best-effort)
     regs: Dict[str, bool] = {}
     try:
-        if s.get("enabled") and s.get("esl_host"):
+        if s.get("esl_host"):
             esl = FreeSwitchESL(
                 host=s["esl_host"], port=int(s.get("esl_port") or 8021),
                 password=s.get("esl_password") or "ClueCon",
@@ -1641,12 +1655,17 @@ async def list_extensions(user: dict = Depends(get_current_user)):
     out = []
     for e in exts:
         ext = str(e.get("extension") or "")
+        enabled_raw = e.get("enabled")
+        if isinstance(enabled_raw, bool):
+            enabled_val = enabled_raw
+        else:
+            enabled_val = str(enabled_raw).lower() in ("true", "t", "1", "yes")
         out.append({
-            "uuid": e.get("uuid"),
+            "uuid": e.get("uuid") or e.get("extension_uuid"),
             "extension": ext,
-            "caller_id_name": e.get("caller_id_name"),
-            "caller_id_number": e.get("caller_id_number"),
-            "enabled": e.get("enabled") == "true" or e.get("enabled") is True,
+            "caller_id_name": e.get("caller_id_name") or e.get("effective_caller_id_name"),
+            "caller_id_number": e.get("caller_id_number") or e.get("effective_caller_id_number"),
+            "enabled": enabled_val,
             "description": e.get("description"),
             "registered": bool(regs.get(ext)),
             "agent_name": agent_by_ext.get(ext),
