@@ -55,11 +55,15 @@ async def _pbx_reload_callcenter(tid: str) -> None:
 async def _pbx_apply_agent_live(tid: str, agent_name: str, *,
                                   status: Optional[str] = None,
                                   state: Optional[str] = None,
-                                  contact: Optional[str] = None) -> Dict[str, Any]:
+                                  contact: Optional[str] = None,
+                                  clear_tiers: bool = False,
+                                  add_tier_queues: Optional[List[str]] = None,
+                                  ) -> Dict[str, Any]:
     """Apply changes directly into mod_callcenter MEMORY (live distributor).
     DB UPDATE persists; this command makes mod_callcenter actually use it now.
     """
-    out = {"status": None, "state": None, "contact": None, "errors": []}
+    out: Dict[str, Any] = {"status": None, "state": None, "contact": None,
+                            "tiers_removed": [], "tiers_added": [], "errors": []}
     try:
         s = await db.fusionpbx_settings.find_one({"tenant_id": tid}) or {}
         if not (s.get("enabled") and s.get("esl_host") and agent_name):
@@ -69,6 +73,10 @@ async def _pbx_apply_agent_live(tid: str, agent_name: str, *,
             password=s.get("esl_password") or "ClueCon",
             timeout=float(s.get("esl_timeout") or 5.0),
         )
+        if clear_tiers:
+            try:
+                out["tiers_removed"] = await esl.callcenter_clear_agent_tiers(agent_name)
+            except Exception as e: out["errors"].append(f"clear_tiers: {e}")
         if contact is not None:
             try: out["contact"] = await esl.callcenter_agent_set(agent_name, "contact", contact)
             except Exception as e: out["errors"].append(f"contact: {e}")
@@ -78,6 +86,12 @@ async def _pbx_apply_agent_live(tid: str, agent_name: str, *,
         if state is not None:
             try: out["state"] = await esl.callcenter_agent_set(agent_name, "state", state)
             except Exception as e: out["errors"].append(f"state: {e}")
+        if add_tier_queues:
+            for qname in add_tier_queues:
+                try:
+                    await esl.callcenter_tier_add(qname, agent_name, 1, 1)
+                    out["tiers_added"].append(qname)
+                except Exception as e: out["errors"].append(f"tier_add {qname}: {e}")
     except Exception as e:
         out["errors"].append(str(e))
     return out
@@ -1652,9 +1666,11 @@ async def set_my_extension(body: ExtensionReq, user: dict = Depends(get_current_
     if pbx_synced:
         await _pbx_reload_callcenter(tid)
         # Aplicar status/contact em memória do mod_callcenter (live)
+        # + limpar tiers antigos (deslogar de todas filas residuais)
         await _pbx_apply_agent_live(
             tid, agent.get("name") or "",
             status="Available", state="Waiting", contact=new_contact,
+            clear_tiers=True,
         )
     await write_audit(user, "update", "agent_extension", aid,
                        f"{agent.get('name')} ramal → {ext}",
@@ -1726,6 +1742,7 @@ async def agent_logout(request: Request):
         await _pbx_apply_agent_live(
             tid, agent.get("name") or "",
             status="Logged Out", state="Idle",
+            clear_tiers=True,  # remove ALL tiers from memory too
         )
     await write_audit(user, "logout", "agent", aid,
                        f"{agent.get('name')} desconectou",
@@ -1825,6 +1842,23 @@ async def select_my_queues(body: QueueSelectionReq, user: dict = Depends(get_cur
                   "active_queues_changed_at": datetime.now(timezone.utc).isoformat()}})
     if pbx_added or pbx_removed:
         await _pbx_reload_callcenter(tid)
+        # Sincroniza tiers em MEMÓRIA: remove todos antigos e adiciona escolhidos
+        chosen_queue_names = []
+        for qid in chosen_ids:
+            q = qmap.get(qid) or {}
+            qname = q.get("name") or q.get("extension")
+            if qname:
+                # Em algumas instalações a fila é nomeada "<ext>@<domain>"
+                domain = (await db.fusionpbx_settings.find_one({"tenant_id": tid}) or {}).get("domain_name")
+                if domain and "@" not in qname:
+                    qname = f"{qname}@{domain}"
+                chosen_queue_names.append(qname)
+        await _pbx_apply_agent_live(
+            tid, me.get("name") or "",
+            clear_tiers=True,
+            add_tier_queues=chosen_queue_names,
+            status="Available", state="Waiting",
+        )
     await write_audit(user, "update", "agent_queues", aid,
                        f"{me.get('name')} ativou {len(chosen_ids)} fila(s)",
                        {"active_queues": chosen_ids,

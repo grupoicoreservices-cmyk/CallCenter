@@ -182,6 +182,38 @@ class FreeSwitchESL:
         return await self.api(
             f"callcenter_config tier del {queue_name} {agent_name}")
 
+    async def callcenter_tier_list(self) -> List[Dict[str, str]]:
+        """Returns all tiers (queue, agent, level, position) in memory."""
+        out = await self.api("callcenter_config tier list")
+        rows: List[Dict[str, str]] = []
+        for line in (out or "").splitlines():
+            line = line.strip()
+            if not line or line.startswith("+OK") or line.startswith("-ERR"):
+                continue
+            parts = line.split("|")
+            if len(parts) >= 2:
+                rows.append({
+                    "queue": parts[0].strip(),
+                    "agent": parts[1].strip() if len(parts) > 1 else "",
+                    "level": parts[2].strip() if len(parts) > 2 else "",
+                    "position": parts[3].strip() if len(parts) > 3 else "",
+                })
+        return rows
+
+    async def callcenter_clear_agent_tiers(self, agent_name: str) -> List[str]:
+        """Remove ALL tiers of a given agent from mod_callcenter MEMORY.
+        Returns a list of queue names that were removed."""
+        tiers = await self.callcenter_tier_list()
+        removed: List[str] = []
+        for t in tiers:
+            if t.get("agent") == agent_name and t.get("queue"):
+                try:
+                    await self.callcenter_tier_del(t["queue"], agent_name)
+                    removed.append(t["queue"])
+                except Exception:
+                    pass
+        return removed
+
 
 def normalize_esl_channel(c: Dict[str, Any]) -> Dict[str, Any]:
     """Map a row from 'show channels as json' to our internal shape."""
