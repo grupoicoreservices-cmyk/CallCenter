@@ -1812,6 +1812,7 @@ async def agent_logout(request: Request):
     s = await db.fusionpbx_settings.find_one({"tenant_id": tid}) or {}
     pbx_logged_out = False
     tiers_removed = 0
+    parking_contact = f"user/999@{s.get('domain_name') or ''}"
     if (s.get("connection_type") == "db" and s.get("db_host")
             and agent.get("external_id")):
         try:
@@ -1830,18 +1831,29 @@ async def agent_logout(request: Request):
                 pbx_logged_out = True
             except Exception as e:
                 logger.warning("logout update_agent_status: %s", e)
+            # Reseta contato para ramal "parking" (999) — agente não recebe
+            # mais nada mesmo se algum reload futuro relistá-lo.
+            try:
+                if s.get("domain_name"):
+                    await client.update_agent_contact(
+                        agent["external_id"], "999", s["domain_name"])
+            except Exception as e:
+                logger.warning("logout reset contact 999: %s", e)
         except Exception as e:
             logger.warning("agent_logout PBX falhou: %s", e)
     await db.agents.update_one(
         {"id": aid},
         {"$set": {"status": "offline", "pbx_status": "Logged Out",
                    "active_queues": [],
+                   "agent_contact": parking_contact,
+                   "extension": "999",
                    "logout_at": datetime.now(timezone.utc).isoformat()}})
     if pbx_logged_out or tiers_removed:
         await _pbx_reload_callcenter(tid)
         await _pbx_apply_agent_live(
             tid, agent.get("external_id") or "",
             status="Logged Out", state="Idle",
+            contact=parking_contact,
             clear_tiers=True,
         )
     await write_audit(user, "logout", "agent", aid,
