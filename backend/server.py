@@ -114,6 +114,8 @@ async def _pbx_apply_agent_live(tid: str, agent_name: str, *,
     try:
         s = await db.fusionpbx_settings.find_one({"tenant_id": tid}) or {}
         if not (s.get("enabled") and s.get("esl_host") and agent_name):
+            logger.info("apply_agent_live skip: enabled=%s host=%s name=%s",
+                        s.get("enabled"), bool(s.get("esl_host")), bool(agent_name))
             return out
         esl = FreeSwitchESL(
             host=s["esl_host"], port=int(s.get("esl_port") or 8021),
@@ -123,24 +125,36 @@ async def _pbx_apply_agent_live(tid: str, agent_name: str, *,
         if clear_tiers:
             try:
                 out["tiers_removed"] = await esl.callcenter_clear_agent_tiers(agent_name)
+                logger.info("ESL tiers_removed for %s: %s", agent_name, out["tiers_removed"])
             except Exception as e: out["errors"].append(f"clear_tiers: {e}")
         if contact is not None:
-            try: out["contact"] = await esl.callcenter_agent_set(agent_name, "contact", contact)
+            try:
+                r = await esl.callcenter_agent_set(agent_name, "contact", contact)
+                out["contact"] = r
+                logger.info("ESL set contact %s -> %s | reply=%s", agent_name, contact, r[:120])
             except Exception as e: out["errors"].append(f"contact: {e}")
         if status is not None:
-            try: out["status"] = await esl.callcenter_agent_set(agent_name, "status", status)
+            try:
+                r = await esl.callcenter_agent_set(agent_name, "status", status)
+                out["status"] = r
+                logger.info("ESL set status %s -> %s | reply=%s", agent_name, status, r[:120])
             except Exception as e: out["errors"].append(f"status: {e}")
         if state is not None:
-            try: out["state"] = await esl.callcenter_agent_set(agent_name, "state", state)
+            try:
+                r = await esl.callcenter_agent_set(agent_name, "state", state)
+                out["state"] = r
+                logger.info("ESL set state %s -> %s | reply=%s", agent_name, state, r[:120])
             except Exception as e: out["errors"].append(f"state: {e}")
         if add_tier_queues:
             for qname in add_tier_queues:
                 try:
-                    await esl.callcenter_tier_add(qname, agent_name, 1, 1)
+                    r = await esl.callcenter_tier_add(qname, agent_name, 1, 1)
                     out["tiers_added"].append(qname)
+                    logger.info("ESL tier add %s <- %s | reply=%s", qname, agent_name, r[:120])
                 except Exception as e: out["errors"].append(f"tier_add {qname}: {e}")
     except Exception as e:
         out["errors"].append(str(e))
+        logger.warning("_pbx_apply_agent_live exception: %s", e)
     return out
 
 EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
