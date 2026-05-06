@@ -55,20 +55,18 @@ export default function Agents() {
   async function openEdit(agent) {
     setEditing(agent);
     setCredentials(null);
-    // Fetch related Voxyra user (if any) to prefill email
     let voxyraEmail = "";
     try {
       const { data } = await api.get(`/agents/${agent.id}/linked-user`);
       voxyraEmail = data?.email || "";
     } catch (_) { /* ignore */ }
-    // Map agent.queues -> external_ids
     const queue_uuids = (agent.queues || [])
       .map((qid) => queues.find((q) => q.id === qid)?.external_id)
       .filter(Boolean);
     setForm({
       name: agent.name || "",
       extension: agent.extension || "",
-      agent_id: "",
+      agent_id: agent.username || agent.agent_login || "",
       voxyra_email: voxyraEmail,
       voxyra_password: "",
       sip_password: "",
@@ -82,14 +80,14 @@ export default function Agents() {
 
   async function handleSubmit(e) {
     e?.preventDefault();
-    if (!form.name || !form.extension) { toast.error("Nome e ramal são obrigatórios"); return; }
+    if (!form.name) { toast.error("Nome é obrigatório"); return; }
+    if (!editing && !form.agent_id) { toast.error("ID de login do agente é obrigatório"); return; }
     setSaving(true);
     try {
       if (editing) {
         // Edit mode
         const payload = {
           name: form.name,
-          extension: form.extension,
           queue_uuids: form.queue_uuids,
         };
         if (form.voxyra_email) payload.voxyra_email = form.voxyra_email;
@@ -103,9 +101,11 @@ export default function Agents() {
         setOpen(false);
         load();
       } else {
-        // Create mode (legacy)
+        // Create mode (legacy provision endpoint expects extension; if not given,
+        // use agent_id as extension placeholder so backend creation works.)
         const payload = { ...form };
-        ["agent_id", "voxyra_email", "voxyra_password", "sip_password", "pbx_password"].forEach(k => {
+        if (!payload.extension) payload.extension = payload.agent_id;
+        ["voxyra_email", "voxyra_password", "sip_password", "pbx_password"].forEach(k => {
           if (!payload[k]) delete payload[k];
         });
         const { data } = await api.post(`/fusionpbx/provision/agent${qs}`, payload);
@@ -225,19 +225,22 @@ export default function Agents() {
                 <div><Label>Nome completo *</Label>
                   <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })}
                          placeholder="João Silva" data-testid="agent-form-name" required /></div>
-                <div><Label>Ramal *</Label>
-                  <Input value={form.extension} onChange={(e) => setForm({ ...form, extension: e.target.value })}
-                         placeholder="1001" type="number" data-testid="agent-form-ext" required /></div>
+                <div><Label>ID de login do agente {!editing && "*"}
+                  <span className="text-[10px] text-muted-foreground font-normal ml-1">
+                    (usado em /login)
+                  </span></Label>
+                  <Input value={form.agent_id} onChange={(e) => setForm({ ...form, agent_id: e.target.value })}
+                         placeholder="ex: 100, 1001 ou joao"
+                         disabled={!!editing}
+                         data-testid="agent-form-agentid"
+                         required={!editing} />
+                  {editing && <p className="text-[11px] text-muted-foreground mt-0.5">ID de login não pode ser alterado.</p>}
+                </div>
               </div>
               {!editing && (
-                <div className="grid grid-cols-2 gap-3">
-                  <div><Label>Login do agente <span className="text-[10px] text-muted-foreground">(default = ramal)</span></Label>
-                    <Input value={form.agent_id} onChange={(e) => setForm({ ...form, agent_id: e.target.value })}
-                           placeholder="1001 ou joao" data-testid="agent-form-agentid" /></div>
-                  <div><Label>Email Voxyra <span className="text-[10px] text-muted-foreground">(opcional)</span></Label>
-                    <Input value={form.voxyra_email} onChange={(e) => setForm({ ...form, voxyra_email: e.target.value })}
-                           placeholder="auto-gerado" data-testid="agent-form-email" /></div>
-                </div>
+                <div><Label>Email Voxyra <span className="text-[10px] text-muted-foreground">(opcional — auto-gerado)</span></Label>
+                  <Input value={form.voxyra_email} onChange={(e) => setForm({ ...form, voxyra_email: e.target.value })}
+                         placeholder="auto-gerado" data-testid="agent-form-email" /></div>
               )}
               {editing && (
                 <div><Label>Email Voxyra</Label>
@@ -299,6 +302,9 @@ export default function Agents() {
                   </label>
                 </div>
               )}
+              <div className="text-[11px] text-muted-foreground bg-blue-50 border border-blue-200 rounded p-2">
+                💡 O <b>ramal</b> não é cadastrado aqui. O agente escolhe qual ramal usar a cada login na tela de acesso, e o sistema vincula automaticamente ao FusionPBX.
+              </div>
               <DialogFooter className="pt-3">
                 <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancelar</Button>
                 <Button type="submit" disabled={saving} data-testid="agent-form-submit">

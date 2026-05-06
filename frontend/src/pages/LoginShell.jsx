@@ -107,7 +107,6 @@ export default function LoginShell({ mode = "agent" }) {
       setErr(`Esta conta tem perfil "${r.role}". Use a página correta: ${where}`);
       return;
     }
-    // Agent: send extension to backend so calls ring on the chosen ramal
     if (isAgent && r.role === "agent") {
       try {
         await api.put("/agents/me/extension", { extension: extension.trim() });
