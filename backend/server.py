@@ -35,6 +35,53 @@ from integrations.freeswitch_esl import (
 )
 
 
+async def _pbx_resync_agent_from_db(tid: str, agent_external_id: str) -> Dict[str, Any]:
+    """Lê agent_contact/agent_status do PostgreSQL do PBX e aplica em memória do
+    mod_callcenter via ESL. Use depois de QUALQUER mudança direta no banco
+    (via GUI do FusionPBX, psql, ou UPDATE no próprio Voxyra). O
+    `reload mod_callcenter` não atualiza agentes já carregados — só
+    `agent set contact/status` via ESL garante reflexo imediato."""
+    out: Dict[str, Any] = {"contact": None, "status": None, "errors": []}
+    if not agent_external_id:
+        return out
+    try:
+        s = await db.fusionpbx_settings.find_one({"tenant_id": tid}) or {}
+        if not (s.get("enabled") and s.get("esl_host")
+                and s.get("connection_type") == "db" and s.get("db_host")):
+            return out
+        pg = FusionPBXDBClient(
+            host=s["db_host"], port=int(s.get("db_port") or 5432),
+            database=s.get("db_name") or "fusionpbx",
+            username=s["db_username"], password=s.get("db_password") or "",
+            domain_uuid=s.get("domain_uuid"), ssl=bool(s.get("db_ssl")),
+        )
+        try:
+            conn = await pg._connect()
+            row = await conn.fetchrow(
+                """SELECT agent_contact, agent_status
+                   FROM v_call_center_agents
+                   WHERE call_center_agent_uuid = $1::uuid""",
+                agent_external_id,
+            )
+            await conn.close()
+        except Exception as e:
+            out["errors"].append(f"read db: {e}")
+            return out
+        if not row:
+            out["errors"].append("agent not found in PBX db")
+            return out
+        await _pbx_apply_agent_live(
+            tid, agent_external_id,
+            contact=row["agent_contact"],
+            status=row["agent_status"] or "Logged Out",
+        )
+        out["contact"] = row["agent_contact"]
+        out["status"] = row["agent_status"]
+    except Exception as e:
+        out["errors"].append(str(e))
+    return out
+
+
 async def _pbx_reload_callcenter(tid: str) -> None:
     """After changing tiers/agents in DB, tell mod_callcenter to reload so the
     distributor picks up the changes. Best-effort: silent on failure."""
@@ -1414,6 +1461,48 @@ class AgentEditReq(BaseModel):
     voxyra_password: Optional[str] = None
     sip_password: Optional[str] = None
     queue_uuids: Optional[List[str]] = None  # external_ids
+
+@api.post("/agents/{agent_id}/pbx-resync")
+async def pbx_resync_agent(agent_id: str,
+                            user: dict = Depends(require_permission("agents.edit"))):
+    """Força re-sincronização do agente com a memória do mod_callcenter.
+    Útil quando alguém edita contato/status direto no GUI do FusionPBX e o
+    `reload mod_callcenter` não atualiza agentes já carregados em memória."""
+    f = tenant_filter(user)
+    agent = await db.agents.find_one({"id": agent_id, **f}, {"_id": 0})
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agente não encontrado")
+    if not agent.get("external_id"):
+        raise HTTPException(status_code=400, detail="Agente sem external_id")
+    tid = agent.get("tenant_id")
+    result = await _pbx_resync_agent_from_db(tid, agent["external_id"])
+    try:
+        s = await db.fusionpbx_settings.find_one({"tenant_id": tid}) or {}
+        if s.get("connection_type") == "db" and s.get("db_host"):
+            pg = FusionPBXDBClient(
+                host=s["db_host"], port=int(s.get("db_port") or 5432),
+                database=s.get("db_name") or "fusionpbx",
+                username=s["db_username"], password=s.get("db_password") or "",
+                domain_uuid=s.get("domain_uuid"), ssl=bool(s.get("db_ssl")),
+            )
+            tiers = await pg.list_agent_tiers(agent["external_id"])
+            qnames = []
+            for t in tiers:
+                qn = t.get("queue_name") or ""
+                if qn:
+                    if s.get("domain_name") and "@" not in qn:
+                        qn = f"{qn}@{s['domain_name']}"
+                    qnames.append(qn)
+            await _pbx_apply_agent_live(
+                tid, agent["external_id"],
+                clear_tiers=True, add_tier_queues=qnames,
+            )
+            result["tiers"] = qnames
+    except Exception as e:
+        result["errors"] = (result.get("errors") or []) + [f"tiers: {e}"]
+    await write_audit(user, "resync", "agent", agent_id,
+                       f"Resync PBX: {agent.get('name')}", result)
+    return {"ok": True, **result}
 
 
 @api.get("/agents/{agent_id}/linked-user")
@@ -4041,6 +4130,22 @@ async def _run_sync_for_tenant(tid: str, cdr_limit: int = 5000) -> Dict[str, Any
             )
     except Exception as e:
         logger.warning("[stats] Falha ao recomputar métricas por fila: %s", e)
+    # Re-aplica contatos e status em memória do mod_callcenter para TODOS os
+    # agentes sincronizados. reload mod_callcenter não atualiza agentes já
+    # carregados — só o agent set contact/status via ESL resolve.
+    try:
+        s_cfg = await db.fusionpbx_settings.find_one({"tenant_id": tid}) or {}
+        if s_cfg.get("enabled") and s_cfg.get("esl_host"):
+            synced_agents = await db.agents.find(
+                {"tenant_id": tid, "external_id": {"$ne": None}},
+                {"_id": 0, "external_id": 1}).to_list(500)
+            for a in synced_agents:
+                try:
+                    await _pbx_resync_agent_from_db(tid, a["external_id"])
+                except Exception as e:
+                    logger.warning("resync live de agente falhou: %s", e)
+    except Exception as e:
+        logger.warning("[sync] Falha no resync live de agentes: %s", e)
     summary["status"] = "error" if summary["errors"] and summary["agents_synced"] == 0 else "ok"
     await db.fusionpbx_settings.update_one(
         {"tenant_id": tid},

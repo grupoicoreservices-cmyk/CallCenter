@@ -6,7 +6,7 @@ import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Button } from "../components/ui/button";
 import { Switch } from "../components/ui/switch";
-import { Search, Plus, Trash2, Loader2, Copy, KeyRound, Pencil } from "lucide-react";
+import { Search, Plus, Trash2, Loader2, Copy, KeyRound, Pencil, RefreshCw } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "../components/ui/dialog";
 import { toast } from "sonner";
 import { useAuth } from "../contexts/AuthContext";
@@ -40,6 +40,16 @@ export default function Agents() {
     } catch (e) { /* ignore */ }
   }
   useEffect(() => { load(); /* eslint-disable-next-line */ }, []);
+
+  async function handleResync(a) {
+    try {
+      const { data } = await api.post(`/agents/${a.id}/pbx-resync`);
+      const ct = data.contact ? `contact=${data.contact.split("@")[0].replace("user/", "")}` : "sem contato";
+      toast.success(`Sincronizado: ${a.name} (${ct}, status=${data.status || "?"})`);
+      if (data.errors?.length) data.errors.forEach(e => toast.warning(e));
+      load();
+    } catch (e) { toast.error(formatApiError(e.response?.data?.detail) || "Erro na sincronização"); }
+  }
 
   function openNew() {
     setEditing(null);
@@ -160,6 +170,11 @@ export default function Agents() {
               </div>
               <div className="flex items-center gap-2">
                 <StatusBadge status={a.status} />
+                {canEdit && a.external_id && (
+                  <button onClick={() => handleResync(a)} className="text-zinc-500 hover:text-blue-600 p-1" title="Re-sincronizar com PBX" data-testid={`agent-resync-${a.id}`}>
+                    <RefreshCw size={14} />
+                  </button>
+                )}
                 {canEdit && (
                   <button onClick={() => openEdit(a)} className="text-zinc-500 hover:text-foreground p-1" title="Editar" data-testid={`agent-edit-${a.id}`}>
                     <Pencil size={14} />
