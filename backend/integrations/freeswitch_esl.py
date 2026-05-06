@@ -199,6 +199,20 @@ class FreeSwitchESL:
                 })
         return rows
 
+    async def callcenter_reset_agent(self, agent_uuid: str) -> List[str]:
+        """Reseta contadores de no_answer/calls para que o agente volte a
+        receber chamadas mesmo após falhas (ex: softphone caiu antes).
+        """
+        out = []
+        for cmd in (f"callcenter_config agent set no_answer_count '{agent_uuid}' '0'",
+                    f"callcenter_config agent set ready_time '{agent_uuid}' '0'"):
+            try:
+                r = await self.api(cmd)
+                out.append(r[:80])
+            except Exception:
+                pass
+        return out
+
     async def callcenter_clear_agent_tiers(self, agent_name: str) -> List[str]:
         """Remove ALL tiers of a given agent from mod_callcenter MEMORY.
         Returns a list of queue names that were removed."""
