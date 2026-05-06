@@ -1694,10 +1694,34 @@ async def set_agent_status(agent_id: str, body: AgentStatusReq,
         # Quando voltando para Available, marca state=Waiting para começar a receber.
         # Em pausa/offline marca state=Idle (mod_callcenter não distribui).
         live_state = "Waiting" if new_status in ("online", "available") else "Idle"
+        # Quando o agente fica disponível, garante que os tiers das filas
+        # ativas dele estejam aplicados em memória (importante quando o
+        # mod_callcenter perde tiers após reload ou se o agente nunca passou
+        # por select_my_queues nesta sessão).
+        add_q = None
+        if new_status in ("online", "available"):
+            active_qids = agent.get("active_queues") or agent.get("queues") or []
+            if active_qids:
+                qdocs = await db.queues.find(
+                    {"tenant_id": tid, "id": {"$in": active_qids}},
+                    {"_id": 0, "extension": 1}).to_list(50)
+                domain = (await db.fusionpbx_settings.find_one({"tenant_id": tid}) or {}).get("domain_name")
+                names = []
+                for q in qdocs:
+                    qext = q.get("extension")
+                    if not qext:
+                        continue
+                    qn = str(qext)
+                    if domain and "@" not in qn:
+                        qn = f"{qn}@{domain}"
+                    names.append(qn)
+                add_q = names or None
         await _pbx_apply_agent_live(
             tid, agent.get("external_id") or "",
             status=VOXYRA_STATUS_TO_PBX[new_status],
             state=live_state,
+            clear_tiers=bool(add_q),
+            add_tier_queues=add_q,
         )
 
     await write_audit(user, "update", "agent_status", agent_id,
@@ -1968,22 +1992,26 @@ async def select_my_queues(body: QueueSelectionReq, user: dict = Depends(get_cur
                   "active_queues_changed_at": datetime.now(timezone.utc).isoformat()}})
     if pbx_added or pbx_removed:
         await _pbx_reload_callcenter(tid)
-        # Sincroniza tiers em MEMÓRIA: remove todos antigos e adiciona escolhidos
+        # Sincroniza tiers em MEMÓRIA do mod_callcenter.
+        # IMPORTANTE: o nome da fila no mod_callcenter é
+        # `<queue_extension>@<domain_name>` (ex: 620@grupoicore...),
+        # NÃO o `queue_name` amigável (FILA-SUPORTE-CORP). Usar o nome
+        # amigável faz o tier ser ignorado silenciosamente.
+        domain = (await db.fusionpbx_settings.find_one({"tenant_id": tid}) or {}).get("domain_name")
         chosen_queue_names = []
         for qid in chosen_ids:
             q = qmap.get(qid) or {}
-            qname = q.get("name") or q.get("extension")
-            if qname:
-                # Em algumas instalações a fila é nomeada "<ext>@<domain>"
-                domain = (await db.fusionpbx_settings.find_one({"tenant_id": tid}) or {}).get("domain_name")
-                if domain and "@" not in qname:
-                    qname = f"{qname}@{domain}"
-                chosen_queue_names.append(qname)
+            qext = q.get("extension")
+            if not qext:
+                continue
+            qname = str(qext)
+            if domain and "@" not in qname:
+                qname = f"{qname}@{domain}"
+            chosen_queue_names.append(qname)
         await _pbx_apply_agent_live(
             tid, me.get("external_id") or "",
             clear_tiers=True,
             add_tier_queues=chosen_queue_names,
-            status="Logged Out", state="Idle",
         )
     await write_audit(user, "update", "agent_queues", aid,
                        f"{me.get('name')} ativou {len(chosen_ids)} fila(s)",
