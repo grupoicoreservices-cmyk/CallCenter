@@ -1659,17 +1659,17 @@ async def set_my_extension(body: ExtensionReq, user: dict = Depends(get_current_
     await db.agents.update_one(
         {"id": aid}, {"$set": {"extension": ext,
                                 "agent_contact": new_contact,
-                                "status": "online",
-                                "pbx_status": "Available",
+                                "status": "paused",
+                                "pbx_status": "On Break",
                                 "active_queues": [],  # zera seleção (vai ser feita na próxima tela)
                                 "extension_changed_at": datetime.now(timezone.utc).isoformat()}})
     if pbx_synced:
         await _pbx_reload_callcenter(tid)
-        # Aplicar status/contact em memória do mod_callcenter (live)
-        # mod_callcenter identifica agente pelo UUID (external_id), não nome
+        # Atualiza apenas contact + limpa tiers antigos. Status fica "On Break"
+        # (em pausa). O agente precisa clicar manualmente em Disponível no painel.
         await _pbx_apply_agent_live(
             tid, agent.get("external_id") or "",
-            status="Available", state="Waiting", contact=new_contact,
+            status="On Break", state="Idle", contact=new_contact,
             clear_tiers=True,
         )
     await write_audit(user, "update", "agent_extension", aid,
@@ -1857,7 +1857,7 @@ async def select_my_queues(body: QueueSelectionReq, user: dict = Depends(get_cur
             tid, me.get("external_id") or "",
             clear_tiers=True,
             add_tier_queues=chosen_queue_names,
-            status="Available", state="Waiting",
+            status="On Break", state="Idle",
         )
     await write_audit(user, "update", "agent_queues", aid,
                        f"{me.get('name')} ativou {len(chosen_ids)} fila(s)",
