@@ -207,10 +207,13 @@ export default function Recordings() {
           <audio
             ref={audioRef}
             src={fullUrl(playing.audio_url)}
-            crossOrigin="use-credentials"
             onTimeUpdate={onTime}
             onLoadedMetadata={onTime}
             onEnded={() => setPlayingId(null)}
+            onError={(e) => {
+              const err = e.target?.error;
+              console.error("Audio error:", err?.code, err?.message);
+            }}
           />
         </div>
       )}

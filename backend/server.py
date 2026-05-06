@@ -3251,7 +3251,11 @@ async def stream_recording_endpoint(recording_id: str, request: Request,
     download_name = "_".join(p for p in parts if p) + f".{ext}"
     # ?download=1 force attachment so browser saves with the friendly filename
     is_download = (request.query_params.get("download") in ("1", "true", "yes"))
-    disposition = ("attachment" if is_download else "inline") + f'; filename="{download_name}"'
+    if is_download:
+        disposition = f'attachment; filename="{download_name}"'
+    else:
+        # Inline sem filename: evita que alguns navegadores tratem como download
+        disposition = "inline"
 
     # Range header
     range_header = request.headers.get("range") or request.headers.get("Range")
