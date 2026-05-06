@@ -99,6 +99,40 @@ async def _pbx_reload_callcenter(tid: str) -> None:
         logger.warning("callcenter_reload falhou: %s", e)
 
 
+async def _pbx_resolve_agent_esl_name(tid: str, agent_external_id: str) -> Optional[str]:
+    """No mod_callcenter, o agente é identificado por `agent_id` em memória
+    (que costuma ser `<extension>@<domain>`), NÃO pelo `call_center_agent_uuid`.
+    Esta função consulta o PostgreSQL do FusionPBX para resolver o agent_id real.
+    Cai pro UUID em último caso.
+    """
+    if not agent_external_id:
+        return None
+    try:
+        s = await db.fusionpbx_settings.find_one({"tenant_id": tid}) or {}
+        if not (s.get("connection_type") == "db" and s.get("db_host")):
+            return agent_external_id
+        pg = FusionPBXDBClient(
+            host=s["db_host"], port=int(s.get("db_port") or 5432),
+            database=s.get("db_name") or "fusionpbx",
+            username=s["db_username"], password=s.get("db_password") or "",
+            domain_uuid=s.get("domain_uuid"), ssl=bool(s.get("db_ssl")),
+        )
+        conn = await pg._connect()
+        try:
+            row = await conn.fetchrow(
+                """SELECT agent_id FROM v_call_center_agents
+                   WHERE call_center_agent_uuid = $1::uuid""",
+                agent_external_id,
+            )
+            if row and row["agent_id"]:
+                return row["agent_id"]
+        finally:
+            await conn.close()
+    except Exception as e:
+        logger.warning("resolve_agent_esl_name falhou: %s", e)
+    return agent_external_id
+
+
 async def _pbx_apply_agent_live(tid: str, agent_name: str, *,
                                   status: Optional[str] = None,
                                   state: Optional[str] = None,
@@ -107,11 +141,19 @@ async def _pbx_apply_agent_live(tid: str, agent_name: str, *,
                                   add_tier_queues: Optional[List[str]] = None,
                                   ) -> Dict[str, Any]:
     """Apply changes directly into mod_callcenter MEMORY (live distributor).
-    DB UPDATE persists; this command makes mod_callcenter actually use it now.
+    `agent_name` should be the FusionPBX `agent_id` (typically
+    `<ext>@<domain>`). If a UUID is passed, we resolve it to the real
+    agent_id automatically.
     """
     out: Dict[str, Any] = {"status": None, "state": None, "contact": None,
                             "tiers_removed": [], "tiers_added": [], "errors": []}
     try:
+        # Resolve UUID -> agent_id if it looks like a UUID (8-4-4-4-12)
+        if agent_name and len(agent_name) == 36 and agent_name.count("-") == 4:
+            real = await _pbx_resolve_agent_esl_name(tid, agent_name)
+            if real and real != agent_name:
+                logger.info("apply_agent_live: resolved UUID %s -> agent_id %s", agent_name, real)
+                agent_name = real
         s = await db.fusionpbx_settings.find_one({"tenant_id": tid}) or {}
         if not (s.get("enabled") and s.get("esl_host") and agent_name):
             logger.info("apply_agent_live skip: enabled=%s host=%s name=%s",
