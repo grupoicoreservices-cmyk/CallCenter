@@ -1666,9 +1666,9 @@ async def set_my_extension(body: ExtensionReq, user: dict = Depends(get_current_
     if pbx_synced:
         await _pbx_reload_callcenter(tid)
         # Aplicar status/contact em memória do mod_callcenter (live)
-        # + limpar tiers antigos (deslogar de todas filas residuais)
+        # mod_callcenter identifica agente pelo UUID (external_id), não nome
         await _pbx_apply_agent_live(
-            tid, agent.get("name") or "",
+            tid, agent.get("external_id") or "",
             status="Available", state="Waiting", contact=new_contact,
             clear_tiers=True,
         )
@@ -1740,9 +1740,9 @@ async def agent_logout(request: Request):
     if pbx_logged_out or tiers_removed:
         await _pbx_reload_callcenter(tid)
         await _pbx_apply_agent_live(
-            tid, agent.get("name") or "",
+            tid, agent.get("external_id") or "",
             status="Logged Out", state="Idle",
-            clear_tiers=True,  # remove ALL tiers from memory too
+            clear_tiers=True,
         )
     await write_audit(user, "logout", "agent", aid,
                        f"{agent.get('name')} desconectou",
@@ -1854,7 +1854,7 @@ async def select_my_queues(body: QueueSelectionReq, user: dict = Depends(get_cur
                     qname = f"{qname}@{domain}"
                 chosen_queue_names.append(qname)
         await _pbx_apply_agent_live(
-            tid, me.get("name") or "",
+            tid, me.get("external_id") or "",
             clear_tiers=True,
             add_tier_queues=chosen_queue_names,
             status="Available", state="Waiting",
