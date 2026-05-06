@@ -76,3 +76,7 @@
 
 ## Test Credentials
 See `/app/memory/test_credentials.md`.
+
+## Changelog (recent)
+- 2026-02: Fix — `GET /api/agents` agora exclui ramais por padrão (`include_extensions=False`). Ramais ficam exclusivamente em `/api/extensions`. Mantido parâmetro `?include_extensions=true` para compatibilidade/debug. (server.py list_agents)
+

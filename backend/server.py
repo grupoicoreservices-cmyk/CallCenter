@@ -1482,10 +1482,10 @@ async def cleanup_extension_agents(user: dict = Depends(require_super_admin())):
 
 @api.get("/agents")
 async def list_agents(user: dict = Depends(require_permission("agents.view")),
-                       include_extensions: bool = True):
-    """Lista agentes. Por padrão inclui ramais (source=extension) também,
-    para não esconder ninguém. Para mostrar apenas agentes reais de call
-    center, passe ?include_extensions=false."""
+                       include_extensions: bool = False):
+    """Lista agentes reais do Call Center (source != "extension").
+    Ramais SIP ficam na página dedicada /extensions. Para incluir ramais
+    nesta lista, passe ?include_extensions=true."""
     f = tenant_filter(user)
     if not include_extensions:
         f = {**f, "source": {"$ne": "extension"}}
