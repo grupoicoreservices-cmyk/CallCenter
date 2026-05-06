@@ -151,12 +151,11 @@ class FreeSwitchESL:
                 pass
 
     async def callcenter_reload(self) -> str:
-        """Reload callcenter config so mod_callcenter picks up DB changes
-        (agents, tiers, queues). Tries several flavors for compatibility."""
-        # Prefer callcenter_config to refresh the in-memory tables
-        # without affecting live calls.
-        for cmd in ("callcenter_config reload",
-                    "reload mod_callcenter"):
+        """Reload mod_callcenter so it re-reads agents, tiers e queues do banco.
+        Tenta `reload mod_callcenter` primeiro (compatível com versões antigas e
+        novas) e cai pra `callcenter_config reload` como fallback."""
+        for cmd in ("reload mod_callcenter",
+                    "callcenter_config reload"):
             out = await self.api(cmd)
             if out and not out.startswith("-ERR"):
                 return out
