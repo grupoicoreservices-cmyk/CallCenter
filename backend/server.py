@@ -1586,6 +1586,16 @@ async def set_agent_status(agent_id: str, body: AgentStatusReq,
             except FusionPBXDBError as e:
                 pbx_error = str(e)
                 logger.warning("set_agent_status: PBX update falhou: %s", e)
+    # Reflete em memória do mod_callcenter (live distributor)
+    if tid and agent.get("external_id"):
+        # Quando voltando para Available, marca state=Waiting para começar a receber.
+        # Em pausa/offline marca state=Idle (mod_callcenter não distribui).
+        live_state = "Waiting" if new_status in ("online", "available") else "Idle"
+        await _pbx_apply_agent_live(
+            tid, agent.get("external_id") or "",
+            status=VOXYRA_STATUS_TO_PBX[new_status],
+            state=live_state,
+        )
 
     await write_audit(user, "update", "agent_status", agent_id,
                       f"{agent.get('name')} → {new_status}",
@@ -1659,17 +1669,18 @@ async def set_my_extension(body: ExtensionReq, user: dict = Depends(get_current_
     await db.agents.update_one(
         {"id": aid}, {"$set": {"extension": ext,
                                 "agent_contact": new_contact,
-                                "status": "paused",
-                                "pbx_status": "On Break",
-                                "active_queues": [],  # zera seleção (vai ser feita na próxima tela)
+                                "status": "offline",
+                                "pbx_status": "Logged Out",
+                                "active_queues": [],
                                 "extension_changed_at": datetime.now(timezone.utc).isoformat()}})
     if pbx_synced:
         await _pbx_reload_callcenter(tid)
-        # Atualiza apenas contact + limpa tiers antigos. Status fica "On Break"
-        # (em pausa). O agente precisa clicar manualmente em Disponível no painel.
+        # Atualiza apenas contact + limpa tiers antigos. Status fica
+        # "Logged Out" (deslogado). O agente precisa clicar manualmente em
+        # Disponível no painel para começar a receber chamadas.
         await _pbx_apply_agent_live(
             tid, agent.get("external_id") or "",
-            status="On Break", state="Idle", contact=new_contact,
+            status="Logged Out", state="Idle", contact=new_contact,
             clear_tiers=True,
         )
     await write_audit(user, "update", "agent_extension", aid,
@@ -1857,7 +1868,7 @@ async def select_my_queues(body: QueueSelectionReq, user: dict = Depends(get_cur
             tid, me.get("external_id") or "",
             clear_tiers=True,
             add_tier_queues=chosen_queue_names,
-            status="On Break", state="Idle",
+            status="Logged Out", state="Idle",
         )
     await write_audit(user, "update", "agent_queues", aid,
                        f"{me.get('name')} ativou {len(chosen_ids)} fila(s)",
