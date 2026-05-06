@@ -1650,8 +1650,18 @@ async def list_extensions(user: dict = Depends(get_current_user)):
     # Mark which agents are linked
     agents = await db.agents.find(
         {"tenant_id": tid, "extension": {"$ne": None}},
-        {"_id": 0, "extension": 1, "name": 1}).to_list(500)
-    agent_by_ext = {str(a.get("extension")): a.get("name") for a in agents if a.get("extension")}
+        {"_id": 0, "id": 1, "extension": 1, "name": 1, "source": 1,
+         "status": 1, "pbx_status": 1, "queues": 1}).to_list(500)
+    agent_by_ext: Dict[str, Dict[str, Any]] = {}
+    for a in agents:
+        ext_k = str(a.get("extension") or "")
+        if not ext_k:
+            continue
+        # Prefer real Call Center Agents over extension-sourced records
+        existing = agent_by_ext.get(ext_k)
+        if existing and existing.get("source") == "call_center_agent":
+            continue
+        agent_by_ext[ext_k] = a
     out = []
     for e in exts:
         ext = str(e.get("extension") or "")
@@ -1660,6 +1670,8 @@ async def list_extensions(user: dict = Depends(get_current_user)):
             enabled_val = enabled_raw
         else:
             enabled_val = str(enabled_raw).lower() in ("true", "t", "1", "yes")
+        linked = agent_by_ext.get(ext) or {}
+        is_agent = linked.get("source") == "call_center_agent"
         out.append({
             "uuid": e.get("uuid") or e.get("extension_uuid"),
             "extension": ext,
@@ -1668,7 +1680,12 @@ async def list_extensions(user: dict = Depends(get_current_user)):
             "enabled": enabled_val,
             "description": e.get("description"),
             "registered": bool(regs.get(ext)),
-            "agent_name": agent_by_ext.get(ext),
+            "agent_name": linked.get("name"),
+            "agent_id": linked.get("id") if is_agent else None,
+            "is_agent": is_agent,
+            "agent_status": linked.get("status") if is_agent else None,
+            "agent_pbx_status": linked.get("pbx_status") if is_agent else None,
+            "queues_count": len(linked.get("queues") or []) if is_agent else 0,
         })
     return {"extensions": out}
 
