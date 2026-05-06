@@ -1457,9 +1457,39 @@ async def realtime_calls(user: dict = Depends(require_permission("realtime.view"
         })
     return {"calls": active, "source": "local"}
 
+@api.post("/agents/cleanup-extensions")
+async def cleanup_extension_agents(user: dict = Depends(require_super_admin())):
+    """Remove documentos de agente que vieram de v_extensions (source=extension)
+    quando existem agentes reais (source=call_center_agent) no tenant. Útil
+    para limpar a página de Agentes que lista ramais por engano."""
+    res = {"removed_per_tenant": {}}
+    tids = await db.agents.distinct("tenant_id")
+    for tid in tids:
+        if not tid:
+            continue
+        has_real = await db.agents.count_documents(
+            {"tenant_id": tid, "source": "call_center_agent"})
+        if has_real == 0:
+            continue
+        deleted = await db.agents.delete_many(
+            {"tenant_id": tid, "source": "extension"})
+        if deleted.deleted_count:
+            res["removed_per_tenant"][tid] = deleted.deleted_count
+    await write_audit(user, "cleanup", "agents", "all",
+                       "Removido ramais soltos da lista de agentes", res)
+    return {"ok": True, **res}
+
+
 @api.get("/agents")
-async def list_agents(user: dict = Depends(require_permission("agents.view"))):
+async def list_agents(user: dict = Depends(require_permission("agents.view")),
+                       include_extensions: bool = False):
+    """Lista agentes. Por padrão filtra apenas agentes reais de call center
+    (source=call_center_agent). Para incluir ramais "soltos" (que viram
+    agents quando não há call center configurado), passe ?include_extensions=true.
+    """
     f = tenant_filter(user)
+    if not include_extensions:
+        f = {**f, "source": {"$ne": "extension"}}
     items = await db.agents.find(f, {"_id": 0}).to_list(500)
     # Enrich with missed_count and avg_wait_sec (last 24h)
     cutoff_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
