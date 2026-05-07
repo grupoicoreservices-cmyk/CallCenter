@@ -227,6 +227,25 @@ class FreeSwitchESL:
                     pass
         return removed
 
+    async def callcenter_agent_list(self) -> List[Dict[str, str]]:
+        """Returns all agents (name, status, state, contact) in mod_callcenter MEMORY."""
+        out = await self.api("callcenter_config agent list")
+        rows: List[Dict[str, str]] = []
+        for line in (out or "").splitlines():
+            line = line.strip()
+            if not line or line.startswith("+OK") or line.startswith("-ERR"):
+                continue
+            parts = [p.strip() for p in line.split("|")]
+            if len(parts) >= 1 and parts[0]:
+                rows.append({
+                    "name": parts[0],
+                    "type": parts[1] if len(parts) > 1 else "",
+                    "contact": parts[2] if len(parts) > 2 else "",
+                    "status": parts[3] if len(parts) > 3 else "",
+                    "state": parts[4] if len(parts) > 4 else "",
+                })
+        return rows
+
 
 def normalize_esl_channel(c: Dict[str, Any]) -> Dict[str, Any]:
     """Map a row from 'show channels as json' to our internal shape."""

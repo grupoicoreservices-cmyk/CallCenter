@@ -1588,6 +1588,95 @@ class AgentEditReq(BaseModel):
     sip_password: Optional[str] = None
     queue_uuids: Optional[List[str]] = None  # external_ids
 
+@api.get("/agents/{agent_id}/pbx-state")
+async def get_agent_pbx_state(agent_id: str,
+                                user: dict = Depends(require_permission("agents.view"))):
+    """Diagnóstico: retorna o estado do agente em MEMÓRIA do mod_callcenter
+    (status, state, contact, tiers ativos) e em PostgreSQL (v_call_center_agents).
+    Útil para descobrir por que comandos de login/logoff de fila não estão
+    surtindo efeito (geralmente porque o agent_id em memória difere do que o
+    Voxyra está enviando)."""
+    f = tenant_filter(user)
+    agent = await db.agents.find_one({"id": agent_id, **f}, {"_id": 0})
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agente não encontrado")
+    tid = agent.get("tenant_id")
+    s = await db.fusionpbx_settings.find_one({"tenant_id": tid}) or {}
+    out: Dict[str, Any] = {
+        "voxyra": {
+            "id": agent.get("id"),
+            "name": agent.get("name"),
+            "extension": agent.get("extension"),
+            "external_id": agent.get("external_id"),
+            "source": agent.get("source"),
+            "status": agent.get("status"),
+            "pbx_status": agent.get("pbx_status"),
+            "active_queues": agent.get("active_queues") or [],
+        },
+        "pbx_db": None,
+        "esl_resolved_name": None,
+        "esl_agent_in_memory": None,
+        "esl_tiers_in_memory": [],
+        "esl_all_agents_count": 0,
+        "esl_errors": [],
+    }
+    # 1) PBX DB lookup
+    if s.get("connection_type") == "db" and s.get("db_host") and agent.get("external_id"):
+        try:
+            client = FusionPBXDBClient(
+                host=s["db_host"], port=int(s.get("db_port") or 5432),
+                database=s.get("db_name") or "fusionpbx",
+                username=s["db_username"], password=s.get("db_password") or "",
+                domain_uuid=s.get("domain_uuid"), ssl=bool(s.get("db_ssl")),
+            )
+            conn = await client._connect()
+            try:
+                row = await conn.fetchrow(
+                    """SELECT call_center_agent_uuid::text, agent_id, agent_name,
+                              agent_status, agent_state, agent_contact, agent_type
+                       FROM v_call_center_agents
+                       WHERE call_center_agent_uuid = $1::uuid""",
+                    agent["external_id"],
+                )
+                if row:
+                    out["pbx_db"] = dict(row)
+            finally:
+                await conn.close()
+        except Exception as e:
+            out["esl_errors"].append(f"pbx_db: {e}")
+    # 2) Resolve ESL agent name
+    esl_name = await _pbx_resolve_agent_esl_name(tid, agent.get("external_id") or "")
+    out["esl_resolved_name"] = esl_name
+    # 3) ESL queries
+    if s.get("esl_host"):
+        try:
+            esl = FreeSwitchESL(
+                host=s["esl_host"], port=int(s.get("esl_port") or 8021),
+                password=s.get("esl_password") or "ClueCon",
+                timeout=float(s.get("esl_timeout") or 5.0),
+            )
+            try:
+                all_agents = await esl.callcenter_agent_list()
+                out["esl_all_agents_count"] = len(all_agents)
+                if esl_name:
+                    out["esl_agent_in_memory"] = next(
+                        (a for a in all_agents if a.get("name") == esl_name), None)
+            except Exception as e:
+                out["esl_errors"].append(f"agent_list: {e}")
+            try:
+                all_tiers = await esl.callcenter_tier_list()
+                if esl_name:
+                    out["esl_tiers_in_memory"] = [
+                        t for t in all_tiers if t.get("agent") == esl_name]
+                else:
+                    out["esl_tiers_in_memory"] = all_tiers[:20]
+            except Exception as e:
+                out["esl_errors"].append(f"tier_list: {e}")
+        except Exception as e:
+            out["esl_errors"].append(f"esl: {e}")
+    return out
+
+
 @api.post("/agents/{agent_id}/pbx-resync")
 async def pbx_resync_agent(agent_id: str,
                             user: dict = Depends(require_permission("agents.edit"))):
