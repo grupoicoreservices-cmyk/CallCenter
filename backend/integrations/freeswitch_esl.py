@@ -172,6 +172,14 @@ class FreeSwitchESL:
         cmd = f"callcenter_config agent set {field} '{agent_name}' '{value}'"
         return await self.api(cmd)
 
+    async def callcenter_agent_add(self, agent_name: str,
+                                    agent_type: str = "callback") -> str:
+        """Adds an agent to mod_callcenter MEMORY. Idempotent: if agent already
+        exists FreeSWITCH returns -ERR but it's safe to ignore.
+        agent_type: callback | uuid-standby"""
+        cmd = f"callcenter_config agent add '{agent_name}' '{agent_type}'"
+        return await self.api(cmd)
+
     async def callcenter_tier_add(self, queue_name: str, agent_name: str,
                                    level: int = 1, position: int = 1) -> str:
         return await self.api(

@@ -169,6 +169,18 @@ async def _pbx_apply_agent_live(tid: str, agent_name: str, *,
                 out["tiers_removed"] = await esl.callcenter_clear_agent_tiers(agent_name)
                 logger.info("ESL tiers_removed for %s: %s", agent_name, out["tiers_removed"])
             except Exception as e: out["errors"].append(f"clear_tiers: {e}")
+        # Garante que o agente existe em memória do mod_callcenter ANTES de
+        # mexer em contact/status/tier. Idempotente — se já existir, FreeSWITCH
+        # retorna -ERR e seguimos. Isso resolve o caso onde o agente foi
+        # descarregado da memória (ex: após Logged Out + reload) e os
+        # comandos seguintes seriam ignorados silenciosamente.
+        if contact is not None or status is not None or state is not None or add_tier_queues:
+            try:
+                r = await esl.callcenter_agent_add(agent_name, "callback")
+                logger.info("ESL agent add %s | reply=%s", agent_name, r[:120])
+            except Exception as e:
+                # silencioso — agente já existir é normal
+                logger.debug("ESL agent add (já existe?) %s: %s", agent_name, e)
         if contact is not None:
             try:
                 r = await esl.callcenter_agent_set(agent_name, "contact", contact)
