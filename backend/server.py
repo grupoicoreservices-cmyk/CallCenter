@@ -278,6 +278,7 @@ ALL_PERMISSIONS = [
     {"key": "queues.edit",          "label": "Editar filas",                  "group": "Filas"},
     {"key": "agents.view",          "label": "Ver agentes",                   "group": "Agentes"},
     {"key": "agents.edit",          "label": "Editar agentes",                "group": "Agentes"},
+    {"key": "agent.change_extension","label": "Trocar de ramal sem deslogar",  "group": "Agentes"},
     {"key": "users.manage",         "label": "Gerenciar usuários",            "group": "Administração"},
     {"key": "tenant.settings",      "label": "Configurar empresa (tenant)",   "group": "Administração"},
 ]
@@ -292,7 +293,8 @@ DEFAULT_PERMISSIONS_BY_ROLE = {
         "queues.view", "queues.edit",
         "agents.view", "agents.edit",
     ],
-    "agent": ["dashboard.view", "recordings.view_own", "reports.view"],
+    "agent": ["dashboard.view", "recordings.view_own", "reports.view",
+              "agent.change_extension"],
 }
 
 def effective_permissions(user: dict) -> List[str]:
@@ -2140,9 +2142,20 @@ async def set_my_extension(body: ExtensionReq, user: dict = Depends(get_current_
     """
     if user.get("role") != "agent":
         raise HTTPException(status_code=403, detail="Apenas agentes")
+    # Permissão: agent.change_extension. No primeiro login (extension ainda não
+    # definida) sempre permitimos. Bloqueia somente quando o agente tenta TROCAR
+    # depois de já ter ramal e a permissão foi removida.
     aid = user.get("agent_id")
     if not aid:
         raise HTTPException(status_code=404, detail="Usuário não vinculado a agente")
+    existing_agent = await db.agents.find_one(
+        {"id": aid, "tenant_id": user.get("tenant_id")},
+        {"_id": 0, "extension": 1})
+    cur_ext = (existing_agent or {}).get("extension")
+    is_changing = bool(cur_ext) and cur_ext not in ("", "999")
+    if is_changing and "agent.change_extension" not in effective_permissions(user):
+        raise HTTPException(status_code=403,
+                              detail="Sem permissão para trocar de ramal. Faça logout e logue novamente.")
     ext = (body.extension or "").strip()
     if not ext.isdigit() or not (2 <= len(ext) <= 8):
         raise HTTPException(status_code=400, detail="Ramal inválido (use somente dígitos, 2 a 8 caracteres)")

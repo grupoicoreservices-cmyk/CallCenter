@@ -1,9 +1,14 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Headphones, Pause, LogOut as LogOutIcon, Loader2, Phone, Award, Clock, TrendingUp, Users, PhoneIncoming, ListChecks } from "lucide-react";
+import { Headphones, Pause, LogOut as LogOutIcon, Loader2, Phone, Award, Clock, TrendingUp, Users, PhoneIncoming, ListChecks, ArrowRightLeft } from "lucide-react";
 import { api, fmtDuration, formatApiError } from "../lib/api";
 import { useAuth } from "../contexts/AuthContext";
 import { Button } from "../components/ui/button";
+import { Input } from "../components/ui/input";
+import { Label } from "../components/ui/label";
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
+} from "../components/ui/dialog";
 import { toast } from "sonner";
 import Layout from "../components/Layout";
 
@@ -20,13 +25,17 @@ const DOT = {
 };
 
 export default function AgentDashboard() {
-  const { user, logout } = useAuth();
+  const { user, logout, hasPermission } = useAuth();
   const navigate = useNavigate();
   const [agent, setAgent] = useState(null);
   const [calls, setCalls] = useState([]);
   const [queues, setQueues] = useState([]);
   const [loading, setLoading] = useState(true);
   const [updating, setUpdating] = useState(false);
+  const [showExtModal, setShowExtModal] = useState(false);
+  const [newExt, setNewExt] = useState("");
+  const [savingExt, setSavingExt] = useState(false);
+  const canChangeExtension = hasPermission("agent.change_extension");
 
   async function load() {
     try {
@@ -74,6 +83,31 @@ export default function AgentDashboard() {
     } finally { setUpdating(false); }
   }
 
+  async function changeExtension() {
+    const ext = (newExt || "").trim();
+    if (!/^[0-9]{2,8}$/.test(ext)) {
+      toast.error("Ramal inválido (2 a 8 dígitos)");
+      return;
+    }
+    if (ext === agent?.extension) {
+      toast.info("Você já está nesse ramal");
+      return;
+    }
+    setSavingExt(true);
+    try {
+      const { data } = await api.put("/agents/me/extension", { extension: ext });
+      localStorage.setItem("agent_extension", ext);
+      toast.success(`Ramal trocado para ${ext}${data.pbx_synced ? " · PBX sincronizado ✓" : ""}`);
+      if (data.pbx_error) toast.warning("PBX: " + data.pbx_error);
+      setShowExtModal(false);
+      setNewExt("");
+      // Após trocar, agente fica Logged Out e precisa selecionar filas de novo
+      navigate("/agent/select-queues");
+    } catch (e) {
+      toast.error(formatApiError(e.response?.data?.detail) || "Erro ao trocar ramal");
+    } finally { setSavingExt(false); }
+  }
+
   if (loading) return <Layout title="Carregando…"><div className="p-8 text-center text-muted-foreground"><Loader2 className="animate-spin mx-auto" /></div></Layout>;
   if (!agent) return <Layout title="Sem vínculo">
     <div className="border border-amber-200 bg-amber-50 rounded-sm p-6 text-center">
@@ -98,6 +132,22 @@ export default function AgentDashboard() {
                 desde {new Date(agent.status_changed_at).toLocaleString("pt-BR")}
               </div>
             )}
+          </div>
+          <div className="hidden md:flex flex-col items-end pr-4 border-r border-zinc-300/40">
+            <div className="text-[10px] uppercase tracking-widest text-muted-foreground font-medium">Sentado no ramal</div>
+            <div className="flex items-center gap-2 mt-0.5">
+              <Phone size={14} className="text-muted-foreground" />
+              <span className="font-mono text-2xl font-bold text-foreground" data-testid="agent-current-extension">
+                {agent.extension || "—"}
+              </span>
+              {canChangeExtension && (
+                <Button variant="outline" size="sm" className="ml-2 h-7 text-[11px]"
+                  onClick={() => { setNewExt(""); setShowExtModal(true); }}
+                  data-testid="agent-change-extension-btn">
+                  <ArrowRightLeft size={11} className="mr-1" /> Trocar
+                </Button>
+              )}
+            </div>
           </div>
           <img src={agent.avatar} alt={agent.name} className="w-16 h-16 rounded-full border-2 border-white shadow-sm" />
         </div>
@@ -241,6 +291,40 @@ export default function AgentDashboard() {
           )}
         </div>
       </div>
+
+      <Dialog open={showExtModal} onOpenChange={(o) => !savingExt && setShowExtModal(o)}>
+        <DialogContent className="max-w-md" data-testid="agent-change-extension-modal">
+          <DialogHeader>
+            <DialogTitle>Trocar de ramal</DialogTitle>
+            <DialogDescription>
+              Informe o novo ramal onde você está sentado. As próximas chamadas tocarão lá.
+              Você será redirecionado para escolher as filas novamente.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            <div className="text-[11px] uppercase tracking-widest text-muted-foreground font-medium">
+              Ramal atual: <span className="font-mono text-foreground">{agent.extension || "—"}</span>
+            </div>
+            <div>
+              <Label htmlFor="new-ext">Novo ramal</Label>
+              <Input id="new-ext" type="text" inputMode="numeric" pattern="[0-9]*"
+                value={newExt} maxLength={8} placeholder="Ex: 1002"
+                onChange={(e) => setNewExt(e.target.value.replace(/\D/g, ""))}
+                data-testid="agent-new-extension-input"
+                onKeyDown={(e) => { if (e.key === "Enter") changeExtension(); }} />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowExtModal(false)} disabled={savingExt}
+              data-testid="agent-change-extension-cancel">Cancelar</Button>
+            <Button onClick={changeExtension} disabled={savingExt || !newExt}
+              data-testid="agent-change-extension-confirm">
+              {savingExt ? <Loader2 size={14} className="mr-1.5 animate-spin" /> : <ArrowRightLeft size={14} className="mr-1.5" />}
+              Trocar ramal
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Layout>
   );
 }
