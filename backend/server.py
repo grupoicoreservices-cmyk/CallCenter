@@ -4397,36 +4397,27 @@ async def _run_sync_for_tenant(tid: str, cdr_limit: int = 5000) -> Dict[str, Any
                "recordings_synced": 0,
                "errors": [], "started_at": datetime.now(timezone.utc).isoformat(),
                "agent_source": None}
-    # Agents — preferimos call_center_agents (entidade dedicada).
-    # Se não houver agentes cadastrados, caímos para extensions (ramais).
+    # Agents — APENAS Call Center Agents reais (v_call_center_agents).
+    # Ramais SIP (v_extensions) NÃO são sincronizados como agentes — eles são
+    # apenas o "telefone" onde o agente atende. O usuário cadastra agentes
+    # diretamente em Apps → Call Center → Agents do FusionPBX.
     agent_records: list = []
     agent_source = "call_center_agent"
     try:
         cc_agents = await client.list_call_center_agents()
         if cc_agents:
             agent_records = [normalize_agent(a) for a in cc_agents]
-        else:
-            agent_source = "extension"
-            exts = await client.list_extensions()
-            agent_records = [normalize_extension(e) for e in exts]
     except ClientErr as e:
-        # Se falhar agentes, ainda tenta extensões
-        try:
-            agent_source = "extension"
-            exts = await client.list_extensions()
-            agent_records = [normalize_extension(e) for e in exts]
-        except ClientErr as e2:
-            summary["errors"].append(f"agents: {e} | extensions: {e2}")
+        summary["errors"].append(f"agents: {e}")
     summary["agent_source"] = agent_source
-    # Quando temos call_center_agents reais, removemos os ramais (source=extension) sincronizados antes
-    if agent_source == "call_center_agent" and agent_records:
-        del_res = await db.agents.delete_many({
-            "tenant_id": tid, "source": "extension", "external_id": {"$ne": None},
-        })
-        if del_res.deleted_count > 0:
-            summary["legacy_extensions_removed"] = del_res.deleted_count
-            logger.info("[sync] Removidos %d ramais antigos (substituídos por agentes CCA)",
-                        del_res.deleted_count)
+    # Sempre limpa ramais legados de db.agents (caso de instalações antigas)
+    del_res = await db.agents.delete_many({
+        "tenant_id": tid, "source": "extension",
+    })
+    if del_res.deleted_count > 0:
+        summary["legacy_extensions_removed"] = del_res.deleted_count
+        logger.info("[sync] Removidos %d ramais antigos de db.agents",
+                    del_res.deleted_count)
     # Map FusionPBX agent_status → Voxyra status
     def _map_status(pbx_status: Optional[str]) -> Optional[str]:
         if not pbx_status: return None
