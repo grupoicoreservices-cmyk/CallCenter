@@ -231,38 +231,41 @@ class FreeSwitchESL:
                                                    domain: Optional[str] = None
                                                    ) -> Dict[str, Any]:
         """Defensive cleanup: removes all tiers and forces Logged Out for
-        ANY agent in mod_callcenter memory whose name matches the given
-        extension in ANY common format (`1001`, `1001@dominio`,
-        `1001@anything`). Use this when login/logoff commands aren't
-        taking effect because of name mismatch.
-        Returns: {tiers_removed, agents_logged_out, names_matched}"""
+        ANY agent in mod_callcenter memory whose name OR contact matches
+        the given extension in any common format. Handles the case where
+        the agent name is a UUID (call_center_agent_uuid) and only the
+        `contact` field reveals the real extension (e.g., user/1001@domain).
+        Returns: {tiers_removed, agents_logged_out, names_matched, agents_deleted}"""
         out: Dict[str, Any] = {"tiers_removed": [], "agents_logged_out": [],
-                                "names_matched": []}
+                                "names_matched": [], "agents_deleted": []}
         ext = str(extension).strip()
         if not ext:
             return out
-        # 1) Build matchers (any agent_name starting with `ext` or `ext@`)
+        # 1) Match agents by NAME or by CONTACT
         agents = await self.callcenter_agent_list()
         matched_names = set()
+        contact_signature = f"user/{ext}@"
         for a in agents:
             name = a.get("name") or ""
-            if name == ext or name.startswith(f"{ext}@"):
+            contact = a.get("contact") or ""
+            if (name == ext or name.startswith(f"{ext}@")
+                    or contact_signature in contact):
                 matched_names.add(name)
-        # Also try the exact composed name even if not in list (sometimes
-        # tier exists but agent removed)
+        # Also try the exact composed name even if not in list
         if domain:
             matched_names.add(f"{ext}@{domain}")
         matched_names.add(ext)
         out["names_matched"] = sorted(matched_names)
-        # 2) Remove tiers using each matched name
+        # 2) Remove tiers using each matched name (and also any tier whose
+        # agent appears in matched_names)
         tiers = await self.callcenter_tier_list()
         for t in tiers:
             tname = t.get("agent") or ""
             tqueue = t.get("queue") or ""
             if not tqueue:
                 continue
-            # Match by exact name OR by extension prefix
-            if tname in matched_names or tname == ext or tname.startswith(f"{ext}@"):
+            if (tname in matched_names or tname == ext
+                    or tname.startswith(f"{ext}@")):
                 try:
                     await self.callcenter_tier_del(tqueue, tname)
                     out["tiers_removed"].append({"queue": tqueue, "agent": tname})
@@ -276,10 +279,26 @@ class FreeSwitchESL:
                 out["agents_logged_out"].append(name)
             except Exception:
                 pass
+        # 4) Hard delete duplicates from memory (UUID-style names that are
+        # not the canonical `<ext>@<domain>`). The DB row stays; mod_callcenter
+        # will recreate a single clean entry on next reload.
+        canonical = f"{ext}@{domain}" if domain else None
+        for name in matched_names:
+            if not name or name == ext:
+                continue
+            if canonical and name == canonical:
+                continue
+            try:
+                await self.api(f"callcenter_config agent del '{name}'")
+                out["agents_deleted"].append(name)
+            except Exception:
+                pass
         return out
 
     async def callcenter_agent_list(self) -> List[Dict[str, str]]:
-        """Returns all agents (name, status, state, contact) in mod_callcenter MEMORY."""
+        """Returns all agents (name, type, contact, status, state) in mod_callcenter MEMORY.
+        FreeSWITCH columns: name|system|uuid|type|contact|status|state|...
+        We focus on name (col 0), contact (col 4), status (col 5), state (col 6)."""
         out = await self.api("callcenter_config agent list")
         rows: List[Dict[str, str]] = []
         for line in (out or "").splitlines():
@@ -290,10 +309,12 @@ class FreeSwitchESL:
             if len(parts) >= 1 and parts[0]:
                 rows.append({
                     "name": parts[0],
-                    "type": parts[1] if len(parts) > 1 else "",
-                    "contact": parts[2] if len(parts) > 2 else "",
-                    "status": parts[3] if len(parts) > 3 else "",
-                    "state": parts[4] if len(parts) > 4 else "",
+                    "system": parts[1] if len(parts) > 1 else "",
+                    "uuid": parts[2] if len(parts) > 2 else "",
+                    "type": parts[3] if len(parts) > 3 else "",
+                    "contact": parts[4] if len(parts) > 4 else "",
+                    "status": parts[5] if len(parts) > 5 else "",
+                    "state": parts[6] if len(parts) > 6 else "",
                 })
         return rows
 
