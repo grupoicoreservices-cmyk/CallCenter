@@ -309,17 +309,68 @@ DEFAULT_PERMISSIONS_BY_ROLE = {
               "agent.change_extension"],
 }
 
+# Built-in roles (não podem ser deletados, mas as permissões podem ser editadas)
+BUILTIN_ROLES = ["admin", "supervisor", "agent"]
+
+# Cache simples por tenant (TTL implícito — invalidado em escritas)
+_role_template_cache: Dict[str, Dict[str, List[str]]] = {}
+
+async def _load_tenant_role_templates(tid: str) -> Dict[str, List[str]]:
+    """Carrega todos os templates de roles do tenant. Retorna {role_key: [perms]}."""
+    if not tid:
+        return {}
+    if tid in _role_template_cache:
+        return _role_template_cache[tid]
+    docs = await db.role_templates.find({"tenant_id": tid}, {"_id": 0}).to_list(50)
+    out = {d["key"]: list(d.get("permissions") or []) for d in docs}
+    _role_template_cache[tid] = out
+    return out
+
+def _invalidate_role_template_cache(tid: Optional[str] = None):
+    if tid is None:
+        _role_template_cache.clear()
+    else:
+        _role_template_cache.pop(tid, None)
+
+async def effective_permissions_async(user: dict) -> List[str]:
+    """Permissões efetivas de um usuário considerando:
+    1) user.permissions custom (se setado, vence tudo)
+    2) template do role no tenant atual (db.role_templates)
+    3) DEFAULT_PERMISSIONS_BY_ROLE (fallback)"""
+    role = user.get("role", "agent")
+    if role == "super_admin":
+        return DEFAULT_PERMISSIONS_BY_ROLE["super_admin"]
+    perms = user.get("permissions")
+    if perms is not None:
+        return perms
+    tid = user.get("tenant_id")
+    if tid:
+        tpl = await _load_tenant_role_templates(tid)
+        if role in tpl:
+            return tpl[role]
+    return DEFAULT_PERMISSIONS_BY_ROLE.get(role, [])
+
 def effective_permissions(user: dict) -> List[str]:
+    """Versão sync — usado em código sync/legado. Não consulta DB,
+    cai no DEFAULT se o user não tiver custom. Para verificações
+    com templates use require_permission (que é async)."""
     if user.get("role") in ("super_admin", "admin"):
         return DEFAULT_PERMISSIONS_BY_ROLE[user["role"]]
     perms = user.get("permissions")
     if perms is None:
+        # Tenta cache em memória (foi populado por require_permission antes)
+        tid = user.get("tenant_id")
+        if tid and tid in _role_template_cache:
+            tpl = _role_template_cache[tid]
+            if user.get("role") in tpl:
+                return tpl[user["role"]]
         return DEFAULT_PERMISSIONS_BY_ROLE.get(user.get("role", "agent"), [])
     return perms
 
 def require_permission(perm: str):
     async def checker(user: dict = Depends(get_current_user)):
-        if perm not in effective_permissions(user):
+        perms = await effective_permissions_async(user)
+        if perm not in perms:
             raise HTTPException(status_code=403, detail="Sem permissão")
         return user
     return checker
@@ -856,15 +907,155 @@ async def update_billing_settings(body: BillingSettings, user: dict = Depends(re
 # ---------- Permissions metadata ----------
 @api.get("/permissions")
 async def list_permissions(user: dict = Depends(require_permission("users.manage"))):
+    """Retorna metadados de permissões + grupos (templates) do tenant atual.
+    Cada item de `roles` traz já a lista de permissões efetivas do grupo
+    (custom do tenant ou fallback default)."""
+    tid = tenant_scope(user)
+    tpl = await _load_tenant_role_templates(tid) if tid else {}
+    builtin_meta = {
+        "admin": "Administrador",
+        "supervisor": "Supervisor",
+        "agent": "Agente",
+    }
+    roles = []
+    for k, label in builtin_meta.items():
+        roles.append({
+            "key": k,
+            "label": label,
+            "is_builtin": True,
+            "permissions": tpl.get(k, DEFAULT_PERMISSIONS_BY_ROLE.get(k, [])),
+            "is_custom": k in tpl,
+        })
+    if tid:
+        custom_docs = await db.role_templates.find(
+            {"tenant_id": tid, "key": {"$nin": list(builtin_meta.keys())}},
+            {"_id": 0}).to_list(50)
+        for d in custom_docs:
+            roles.append({
+                "key": d["key"],
+                "label": d.get("label") or d["key"],
+                "is_builtin": False,
+                "permissions": d.get("permissions") or [],
+                "is_custom": True,
+            })
     return {
         "permissions": ALL_PERMISSIONS,
         "defaults": DEFAULT_PERMISSIONS_BY_ROLE,
-        "roles": [
-            {"key": "admin", "label": "Administrador"},
-            {"key": "supervisor", "label": "Supervisor"},
-            {"key": "agent", "label": "Agente"},
-        ],
+        "roles": roles,
     }
+
+
+class RoleTemplateUpsert(BaseModel):
+    key: str
+    label: Optional[str] = None
+    permissions: List[str] = []
+    @validator("key")
+    def _k(cls, v):
+        if not v or not v.strip():
+            raise ValueError("Chave do grupo obrigatória")
+        v = v.strip().lower()
+        if not all(c.isalnum() or c in "_-" for c in v):
+            raise ValueError("Chave só pode ter letras, números, _ e -")
+        if v in ("super_admin",):
+            raise ValueError("Chave reservada")
+        return v
+
+
+@api.get("/role-templates")
+async def list_role_templates(user: dict = Depends(require_permission("users.manage"))):
+    """Lista templates de roles do tenant atual, incluindo built-ins (admin,
+    supervisor, agent) com fallback para os defaults quando não há override."""
+    tid = await require_tenant_or_super(user)
+    tpl = await _load_tenant_role_templates(tid)
+    docs = await db.role_templates.find({"tenant_id": tid}, {"_id": 0}).to_list(50)
+    docs_by_key = {d["key"]: d for d in docs}
+    out = []
+    builtin_labels = {"admin": "Administrador", "supervisor": "Supervisor", "agent": "Agente"}
+    for k in BUILTIN_ROLES:
+        d = docs_by_key.get(k)
+        out.append({
+            "key": k,
+            "label": (d.get("label") if d else None) or builtin_labels[k],
+            "is_builtin": True,
+            "permissions": tpl.get(k) or DEFAULT_PERMISSIONS_BY_ROLE.get(k, []),
+            "user_count": await db.users.count_documents({"tenant_id": tid, "role": k}),
+            "has_override": k in tpl,
+        })
+    for k, d in docs_by_key.items():
+        if k in BUILTIN_ROLES:
+            continue
+        out.append({
+            "key": k,
+            "label": d.get("label") or k,
+            "is_builtin": False,
+            "permissions": d.get("permissions") or [],
+            "user_count": await db.users.count_documents({"tenant_id": tid, "role": k}),
+            "has_override": True,
+        })
+    return {"roles": out}
+
+
+@api.put("/role-templates/{role_key}")
+async def upsert_role_template(role_key: str, body: RoleTemplateUpsert,
+                                  user: dict = Depends(require_permission("users.manage"))):
+    """Cria ou atualiza o template de um role no tenant. Para built-ins
+    (admin/supervisor/agent), apenas as permissões são sobrescritas. Para
+    roles custom, a chave do path deve ser igual ao body.key."""
+    tid = await require_tenant_or_super(user)
+    role_key = role_key.strip().lower()
+    if role_key != body.key:
+        raise HTTPException(status_code=400, detail="Chave da URL difere do body")
+    valid_perms = {p["key"] for p in ALL_PERMISSIONS}
+    invalid = [p for p in body.permissions if p not in valid_perms]
+    if invalid:
+        raise HTTPException(status_code=400, detail=f"Permissões inválidas: {invalid}")
+    is_builtin = role_key in BUILTIN_ROLES
+    label = body.label or (
+        {"admin": "Administrador", "supervisor": "Supervisor", "agent": "Agente"}.get(role_key, role_key)
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    existing = await db.role_templates.find_one({"tenant_id": tid, "key": role_key}, {"_id": 0})
+    doc = {
+        "id": existing.get("id") if existing else str(uuid.uuid4()),
+        "tenant_id": tid, "key": role_key, "label": label,
+        "permissions": list(set(body.permissions)),
+        "is_builtin": is_builtin,
+        "updated_at": now,
+        "created_at": existing.get("created_at") if existing else now,
+    }
+    await db.role_templates.update_one(
+        {"tenant_id": tid, "key": role_key},
+        {"$set": doc}, upsert=True)
+    _invalidate_role_template_cache(tid)
+    await write_audit(user, "upsert", "role_template", role_key,
+                       f"Grupo {label} · {len(doc['permissions'])} permissão(ões)",
+                       {"permissions": doc["permissions"]})
+    return {"ok": True, "role": {**doc, "user_count": await db.users.count_documents({"tenant_id": tid, "role": role_key})}}
+
+
+@api.delete("/role-templates/{role_key}")
+async def delete_role_template(role_key: str,
+                                  user: dict = Depends(require_permission("users.manage"))):
+    """Remove um role custom. Built-ins não podem ser removidos — apenas
+    redefinidos para o default ao deletar o override."""
+    tid = await require_tenant_or_super(user)
+    role_key = role_key.strip().lower()
+    if role_key in BUILTIN_ROLES:
+        # Para built-in, apenas remove o override (volta ao default)
+        await db.role_templates.delete_one({"tenant_id": tid, "key": role_key})
+        _invalidate_role_template_cache(tid)
+        await write_audit(user, "reset", "role_template", role_key,
+                           f"Grupo {role_key} resetado para padrão", {})
+        return {"ok": True, "reset": True}
+    in_use = await db.users.count_documents({"tenant_id": tid, "role": role_key})
+    if in_use:
+        raise HTTPException(status_code=400, detail=f"{in_use} usuário(s) ainda usam este grupo. Mude-os antes de remover.")
+    await db.role_templates.delete_one({"tenant_id": tid, "key": role_key})
+    _invalidate_role_template_cache(tid)
+    await write_audit(user, "delete", "role_template", role_key,
+                       f"Grupo {role_key} removido", {})
+    return {"ok": True, "deleted": True}
+
 
 # ---------- Users ----------
 class UserCreate(BaseModel):
@@ -895,11 +1086,18 @@ class UserUpdate(BaseModel):
     active: Optional[bool] = None
     agent_id: Optional[str] = None
 
-def _serialize_user(u: dict) -> dict:
+def _serialize_user(u: dict, tenant_template: Optional[Dict[str, List[str]]] = None) -> dict:
+    role = u.get("role", "agent")
+    if u.get("permissions") is not None:
+        eff = u["permissions"]
+    elif tenant_template and role in tenant_template:
+        eff = tenant_template[role]
+    else:
+        eff = DEFAULT_PERMISSIONS_BY_ROLE.get(role, [])
     return {
         "id": u["id"], "email": u["email"], "name": u.get("name", ""),
-        "role": u.get("role", "agent"), "tenant_id": u.get("tenant_id"),
-        "permissions": u.get("permissions") or DEFAULT_PERMISSIONS_BY_ROLE.get(u.get("role", "agent"), []),
+        "role": role, "tenant_id": u.get("tenant_id"),
+        "permissions": eff,
         "is_custom_permissions": u.get("permissions") is not None,
         "allowed_extensions": u.get("allowed_extensions") or [],
         "active": u.get("active", True), "agent_id": u.get("agent_id"),
@@ -935,13 +1133,19 @@ async def allowed_agent_ids_for(user: dict) -> Optional[set]:
 async def list_users(user: dict = Depends(require_permission("users.manage"))):
     f = tenant_filter(user)
     docs = await db.users.find({**f, "role": {"$ne": "super_admin"}}, {"_id": 0, "password_hash": 0}).sort("created_at", 1).to_list(500)
-    return {"users": [_serialize_user(u) for u in docs]}
+    tid = tenant_scope(user)
+    tpl = await _load_tenant_role_templates(tid) if tid else {}
+    return {"users": [_serialize_user(u, tpl) for u in docs]}
 
 @api.post("/users")
 async def create_user(body: UserCreate, user: dict = Depends(require_permission("users.manage"))):
-    if body.role not in ("admin", "supervisor", "agent"):
-        raise HTTPException(status_code=400, detail="Papel inválido")
     tid = await require_tenant_or_super(user)
+    # Validar role: built-in OU custom existente no tenant
+    valid_roles = set(BUILTIN_ROLES)
+    custom_roles = await db.role_templates.distinct("key", {"tenant_id": tid})
+    valid_roles.update(custom_roles)
+    if body.role not in valid_roles:
+        raise HTTPException(status_code=400, detail=f"Papel inválido. Use um destes: {sorted(valid_roles)}")
     tenant = await db.tenants.find_one({"id": tid})
     cnt = await db.users.count_documents({"tenant_id": tid})
     if tenant and cnt >= tenant.get("max_users", 999):
@@ -1047,7 +1251,7 @@ async def create_user(body: UserCreate, user: dict = Depends(require_permission(
         "permissions_mode": "custom" if body.permissions is not None else "default",
         "provisioned": list(provisioned.keys()),
     })
-    out = _serialize_user(doc)
+    out = _serialize_user(doc, await _load_tenant_role_templates(tid))
     if provisioned:
         out["provisioned"] = provisioned
     return out
@@ -1061,8 +1265,12 @@ async def update_user(user_id: str, body: UserUpdate, user: dict = Depends(requi
     if body.name is not None and body.name != target.get("name"):
         update["name"] = body.name; changes["name"] = {"from": target.get("name"), "to": body.name}
     if body.role is not None and body.role != target.get("role"):
-        if body.role not in ("admin", "supervisor", "agent"):
-            raise HTTPException(status_code=400, detail="Papel inválido")
+        valid_roles = set(BUILTIN_ROLES)
+        if target.get("tenant_id"):
+            valid_roles.update(
+                await db.role_templates.distinct("key", {"tenant_id": target["tenant_id"]}))
+        if body.role not in valid_roles:
+            raise HTTPException(status_code=400, detail=f"Papel inválido. Use um destes: {sorted(valid_roles)}")
         update["role"] = body.role; changes["role"] = {"from": target.get("role"), "to": body.role}
     if body.password:
         update["password_hash"] = hash_password(body.password); changes["password"] = "changed"

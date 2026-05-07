@@ -19,6 +19,7 @@ import Agents from "./pages/Agents";
 import Extensions from "./pages/Extensions";
 import TvPanel from "./pages/TvPanel";
 import Users from "./pages/Users";
+import RoleTemplates from "./pages/RoleTemplates";
 import AuditLogs from "./pages/AuditLogs";
 import Tenants from "./pages/Tenants";
 import Plans from "./pages/Plans";
@@ -53,6 +54,7 @@ function App() {
             <Route path="/extensions" element={<ProtectedRoute hint="master"><Extensions /></ProtectedRoute>} />
             <Route path="/tv" element={<ProtectedRoute hint="master"><TvPanel /></ProtectedRoute>} />
             <Route path="/users" element={<ProtectedRoute hint="master"><Users /></ProtectedRoute>} />
+            <Route path="/role-templates" element={<ProtectedRoute hint="master"><RoleTemplates /></ProtectedRoute>} />
             <Route path="/audit" element={<ProtectedRoute hint="master"><AuditLogs /></ProtectedRoute>} />
             <Route path="/tenants" element={<ProtectedRoute requireSuperAdmin hint="admin"><Tenants /></ProtectedRoute>} />
             <Route path="/plans" element={<ProtectedRoute requireSuperAdmin hint="admin"><Plans /></ProtectedRoute>} />

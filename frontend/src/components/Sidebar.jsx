@@ -17,6 +17,7 @@ const ITEMS = [
   { to: "/agents", label: "Agentes", icon: UserCog, testid: "nav-agents", perm: "agents.view" },
   { to: "/tv", label: "Painel TV", icon: Tv2, testid: "nav-tv", perm: "tv.view" },
   { to: "/users", label: "Usuários", icon: ShieldCheck, testid: "nav-users", perm: "users.manage" },
+  { to: "/role-templates", label: "Grupos & Permissões", icon: Crown, testid: "nav-role-templates", perm: "users.manage" },
   { to: "/audit", label: "Auditoria", icon: History, testid: "nav-audit", perm: "users.manage" },
 ];
 
