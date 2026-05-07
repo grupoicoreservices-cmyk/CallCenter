@@ -293,6 +293,7 @@ ALL_PERMISSIONS = [
     {"key": "agent.change_extension","label": "Trocar de ramal sem deslogar",  "group": "Agentes"},
     {"key": "users.manage",         "label": "Gerenciar usuários",            "group": "Administração"},
     {"key": "tenant.settings",      "label": "Configurar empresa (tenant)",   "group": "Administração"},
+    {"key": "audit.review",         "label": "Auditar gravações (QA)",        "group": "Auditoria"},
 ]
 
 DEFAULT_PERMISSIONS_BY_ROLE = {
@@ -1055,6 +1056,168 @@ async def delete_role_template(role_key: str,
     await write_audit(user, "delete", "role_template", role_key,
                        f"Grupo {role_key} removido", {})
     return {"ok": True, "deleted": True}
+
+
+# ---------- Audit / QA — Avaliação de Gravações ----------
+class EvaluationCreate(BaseModel):
+    score: int  # 1..5
+    comment: Optional[str] = ""
+    criteria: Optional[Dict[str, int]] = None  # {"abertura":4,"escuta_ativa":5,...}
+    @validator("score")
+    def _s(cls, v):
+        if v < 1 or v > 5:
+            raise ValueError("Nota deve estar entre 1 e 5")
+        return v
+
+
+@api.get("/audit/recordings")
+async def audit_list_recordings(
+    user: dict = Depends(require_permission("audit.review")),
+    agent_id: Optional[str] = None,
+    queue_id: Optional[str] = None,
+    period: str = "30d",   # 24h | 7d | 30d | 90d | all
+    evaluation_status: str = "all",  # all | evaluated | pending
+    min_score: Optional[int] = None,
+    max_score: Optional[int] = None,
+):
+    """Lista gravações com metadados de avaliação."""
+    f = {**tenant_filter(user)}
+    if period != "all":
+        cutoff = _period_cutoff(period).isoformat()
+        f["started_at"] = {"$gte": cutoff}
+    if agent_id: f["agent_id"] = agent_id
+    if queue_id: f["queue_id"] = queue_id
+    # Filtro por extension whitelist do supervisor
+    allowed_agent_ids = await allowed_agent_ids_for(user)
+    if allowed_agent_ids is not None:
+        if not allowed_agent_ids:
+            return {"recordings": []}
+        existing = f.get("agent_id")
+        if isinstance(existing, str):
+            if existing not in allowed_agent_ids:
+                return {"recordings": []}
+        else:
+            f["agent_id"] = {"$in": list(allowed_agent_ids)}
+    recs = await db.recordings.find(f, {"_id": 0}).sort("started_at", -1).to_list(500)
+    if not recs:
+        return {"recordings": []}
+    rec_ids = [r["id"] for r in recs]
+    evals = await db.recording_evaluations.find(
+        {"tenant_id": user.get("tenant_id") or recs[0].get("tenant_id"),
+         "recording_id": {"$in": rec_ids}},
+        {"_id": 0}).to_list(len(rec_ids))
+    by_rec = {e["recording_id"]: e for e in evals}
+    out = []
+    for r in recs:
+        ev = by_rec.get(r["id"])
+        item = dict(r)
+        if ev:
+            item["evaluation"] = {
+                "score": ev.get("score"),
+                "comment": ev.get("comment"),
+                "evaluator_name": ev.get("evaluator_name"),
+                "evaluator_id": ev.get("evaluator_id"),
+                "criteria": ev.get("criteria"),
+                "updated_at": ev.get("updated_at"),
+            }
+        else:
+            item["evaluation"] = None
+        if evaluation_status == "evaluated" and not ev: continue
+        if evaluation_status == "pending" and ev: continue
+        if min_score is not None and (not ev or (ev.get("score") or 0) < min_score): continue
+        if max_score is not None and (not ev or (ev.get("score") or 0) > max_score): continue
+        out.append(item)
+    return {"recordings": out}
+
+
+@api.get("/audit/recordings/{rec_id}/evaluation")
+async def audit_get_eval(rec_id: str, user: dict = Depends(require_permission("audit.review"))):
+    f = tenant_filter(user)
+    rec = await db.recordings.find_one({"id": rec_id, **f}, {"_id": 0})
+    if not rec:
+        raise HTTPException(status_code=404, detail="Gravação não encontrada")
+    ev = await db.recording_evaluations.find_one(
+        {"tenant_id": rec.get("tenant_id"), "recording_id": rec_id}, {"_id": 0})
+    return {"recording": rec, "evaluation": ev}
+
+
+@api.post("/audit/recordings/{rec_id}/evaluation")
+async def audit_save_eval(rec_id: str, body: EvaluationCreate,
+                            user: dict = Depends(require_permission("audit.review"))):
+    f = tenant_filter(user)
+    rec = await db.recordings.find_one({"id": rec_id, **f}, {"_id": 0})
+    if not rec:
+        raise HTTPException(status_code=404, detail="Gravação não encontrada")
+    now = datetime.now(timezone.utc).isoformat()
+    existing = await db.recording_evaluations.find_one(
+        {"tenant_id": rec.get("tenant_id"), "recording_id": rec_id}, {"_id": 0})
+    doc = {
+        "id": existing.get("id") if existing else str(uuid.uuid4()),
+        "tenant_id": rec.get("tenant_id"),
+        "recording_id": rec_id,
+        "agent_id": rec.get("agent_id"),
+        "agent_name": rec.get("agent_name"),
+        "queue_id": rec.get("queue_id"),
+        "evaluator_id": user["id"],
+        "evaluator_name": user.get("name") or user.get("email"),
+        "score": body.score,
+        "comment": (body.comment or "").strip(),
+        "criteria": body.criteria or {},
+        "updated_at": now,
+        "created_at": existing.get("created_at") if existing else now,
+    }
+    await db.recording_evaluations.update_one(
+        {"tenant_id": doc["tenant_id"], "recording_id": rec_id},
+        {"$set": doc}, upsert=True)
+    await write_audit(user, "evaluate", "recording", rec_id,
+                       f"Avaliação {body.score}/5 · {rec.get('agent_name') or '?'}",
+                       {"score": body.score, "agent_id": rec.get("agent_id")})
+    return {"ok": True, "evaluation": doc}
+
+
+@api.delete("/audit/recordings/{rec_id}/evaluation")
+async def audit_delete_eval(rec_id: str, user: dict = Depends(require_permission("audit.review"))):
+    f = tenant_filter(user)
+    rec = await db.recordings.find_one({"id": rec_id, **f}, {"_id": 0})
+    if not rec:
+        raise HTTPException(status_code=404, detail="Gravação não encontrada")
+    res = await db.recording_evaluations.delete_one(
+        {"tenant_id": rec.get("tenant_id"), "recording_id": rec_id})
+    if res.deleted_count:
+        await write_audit(user, "delete", "evaluation", rec_id,
+                           f"Avaliação removida · {rec.get('agent_name') or '?'}", {})
+    return {"ok": True, "deleted": res.deleted_count}
+
+
+@api.get("/audit/stats")
+async def audit_stats(user: dict = Depends(require_permission("audit.review")),
+                        period: str = "30d"):
+    f = {**tenant_filter(user)}
+    if period != "all":
+        cutoff = _period_cutoff(period).isoformat()
+        f["created_at"] = {"$gte": cutoff}
+    evals = await db.recording_evaluations.find(f, {"_id": 0}).to_list(2000)
+    total = len(evals)
+    if not total:
+        return {"total": 0, "avg_score": 0, "by_agent": [], "score_distribution": {1:0,2:0,3:0,4:0,5:0}}
+    avg = round(sum(e.get("score", 0) for e in evals) / total, 2)
+    dist: Dict[int, int] = {1:0,2:0,3:0,4:0,5:0}
+    by_agent: Dict[str, Dict[str, Any]] = {}
+    for e in evals:
+        s = int(e.get("score") or 0)
+        if s in dist: dist[s] += 1
+        aid = e.get("agent_id") or "—"
+        if aid not in by_agent:
+            by_agent[aid] = {"agent_id": aid, "agent_name": e.get("agent_name") or "—",
+                              "count": 0, "total_score": 0}
+        by_agent[aid]["count"] += 1
+        by_agent[aid]["total_score"] += s
+    rows = []
+    for a in by_agent.values():
+        rows.append({**a, "avg_score": round(a["total_score"] / a["count"], 2)})
+    rows.sort(key=lambda r: -r["avg_score"])
+    return {"total": total, "avg_score": avg, "by_agent": rows,
+             "score_distribution": dist}
 
 
 # ---------- Users ----------
