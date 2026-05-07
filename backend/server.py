@@ -1706,6 +1706,7 @@ async def list_extensions(user: dict = Depends(get_current_user)):
     # Apply per-user extension whitelist (None = unrestricted)
     allowed_ext = allowed_extensions_for(user)
     out = []
+    seen_exts = set()
     for e in exts:
         ext = str(e.get("extension") or "")
         if allowed_ext is not None and ext not in allowed_ext:
@@ -1717,6 +1718,7 @@ async def list_extensions(user: dict = Depends(get_current_user)):
             enabled_val = str(enabled_raw).lower() in ("true", "t", "1", "yes")
         linked = agent_by_ext.get(ext) or {}
         is_agent = linked.get("source") == "call_center_agent"
+        seen_exts.add(ext)
         out.append({
             "uuid": e.get("uuid") or e.get("extension_uuid"),
             "extension": ext,
@@ -1731,6 +1733,31 @@ async def list_extensions(user: dict = Depends(get_current_user)):
             "agent_status": linked.get("status") if is_agent else None,
             "agent_pbx_status": linked.get("pbx_status") if is_agent else None,
             "queues_count": len(linked.get("queues") or []) if is_agent else 0,
+        })
+    # Append Call Center Agents that don't have a matching SIP extension in v_extensions
+    # (e.g., agent_contact format not parsed, or pure callcenter agents without phone)
+    for a in agents:
+        if a.get("source") != "call_center_agent":
+            continue
+        ext = str(a.get("extension") or "")
+        if ext and ext in seen_exts:
+            continue
+        if allowed_ext is not None and ext and ext not in allowed_ext:
+            continue
+        out.append({
+            "uuid": a.get("id"),
+            "extension": ext or "—",
+            "caller_id_name": a.get("name"),
+            "caller_id_number": ext or None,
+            "enabled": True,
+            "description": "Agente Call Center (sem ramal SIP correspondente)",
+            "registered": bool(regs.get(ext)) if ext else False,
+            "agent_name": a.get("name"),
+            "agent_id": a.get("id"),
+            "is_agent": True,
+            "agent_status": a.get("status"),
+            "agent_pbx_status": a.get("pbx_status"),
+            "queues_count": len(a.get("queues") or []),
         })
     return {"extensions": out}
 
