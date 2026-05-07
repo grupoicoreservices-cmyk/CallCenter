@@ -44,7 +44,7 @@ export default function Users() {
       const [u, p, a, q, x] = await Promise.all([
         api.get("/users"),
         api.get("/permissions"),
-        api.get("/agents").catch(() => ({ data: { agents: [] } })),
+        api.get("/agents?include_extensions=true").catch(() => ({ data: { agents: [] } })),
         api.get("/queues").catch(() => ({ data: { queues: [] } })),
         api.get("/extensions").catch(() => ({ data: { extensions: [] } })),
       ]);
