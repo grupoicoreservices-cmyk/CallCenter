@@ -857,6 +857,7 @@ class UserCreate(BaseModel):
     email: str; password: str; name: str
     role: str = "agent"
     permissions: Optional[List[str]] = None
+    allowed_extensions: Optional[List[str]] = None  # None/[] = vê todos os ramais
     active: bool = True
     agent_id: Optional[str] = None
     # Provisionamento opcional no FusionPBX
@@ -876,6 +877,7 @@ class UserUpdate(BaseModel):
     role: Optional[str] = None
     password: Optional[str] = None
     permissions: Optional[List[str]] = None
+    allowed_extensions: Optional[List[str]] = None  # None = não altera, [] = limpar (ver todos)
     active: Optional[bool] = None
     agent_id: Optional[str] = None
 
@@ -885,9 +887,35 @@ def _serialize_user(u: dict) -> dict:
         "role": u.get("role", "agent"), "tenant_id": u.get("tenant_id"),
         "permissions": u.get("permissions") or DEFAULT_PERMISSIONS_BY_ROLE.get(u.get("role", "agent"), []),
         "is_custom_permissions": u.get("permissions") is not None,
+        "allowed_extensions": u.get("allowed_extensions") or [],
         "active": u.get("active", True), "agent_id": u.get("agent_id"),
         "created_at": u.get("created_at"),
     }
+
+
+def allowed_extensions_for(user: dict) -> Optional[set]:
+    """Retorna None (sem restrição) ou um set com os ramais permitidos.
+    Admins e super_admin sempre veem tudo."""
+    if user.get("role") in ("super_admin", "admin"):
+        return None
+    allowed = user.get("allowed_extensions") or []
+    if not allowed:
+        return None
+    return {str(x) for x in allowed}
+
+
+async def allowed_agent_ids_for(user: dict) -> Optional[set]:
+    """Retorna None (sem restrição) ou um set de agent_id (db.agents.id) cujos
+    ramais estão na whitelist do usuário. Útil para filtrar recordings, reports
+    e calls que se referem a agent_id."""
+    allowed = allowed_extensions_for(user)
+    if allowed is None:
+        return None
+    f = tenant_filter(user)
+    docs = await db.agents.find(
+        {**f, "extension": {"$in": list(allowed)}},
+        {"_id": 0, "id": 1}).to_list(500)
+    return {d["id"] for d in docs if d.get("id")}
 
 @api.get("/users")
 async def list_users(user: dict = Depends(require_permission("users.manage"))):
@@ -995,6 +1023,7 @@ async def create_user(body: UserCreate, user: dict = Depends(require_permission(
         "id": uid, "tenant_id": tid, "email": email, "name": body.name, "role": body.role,
         "password_hash": hash_password(body.password),
         "permissions": body.permissions, "active": body.active,
+        "allowed_extensions": [str(x) for x in (body.allowed_extensions or [])],
         "agent_id": voxyra_agent_id_for_link,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -1028,6 +1057,10 @@ async def update_user(user_id: str, body: UserUpdate, user: dict = Depends(requi
         if invalid: raise HTTPException(status_code=400, detail=f"Permissões inválidas: {invalid}")
         update["permissions"] = body.permissions
         changes["permissions"] = {"count": len(body.permissions), "mode": "custom"}
+    if body.allowed_extensions is not None:
+        normalized = [str(x) for x in body.allowed_extensions]
+        update["allowed_extensions"] = normalized
+        changes["allowed_extensions"] = {"count": len(normalized)}
     if body.active is not None and body.active != target.get("active", True):
         update["active"] = body.active; changes["active"] = {"from": target.get("active", True), "to": body.active}
     if body.agent_id is not None and body.agent_id != target.get("agent_id"):
@@ -1306,6 +1339,11 @@ async def dashboard_abandoned(user: dict = Depends(require_permission("dashboard
 async def realtime_calls(user: dict = Depends(require_permission("realtime.view"))):
     f = tenant_filter(user)
     tid = tenant_scope(user)
+    allowed_ext = allowed_extensions_for(user)
+    def _filter_calls(calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if allowed_ext is None:
+            return calls
+        return [c for c in calls if str(c.get("agent_extension") or "") in allowed_ext]
     if tid:
         s = await db.fusionpbx_settings.find_one({"tenant_id": tid})
         if s and s.get("enabled"):
@@ -1381,7 +1419,7 @@ async def realtime_calls(user: dict = Depends(require_permission("realtime.view"
                                 "elapsed_sec": elapsed,
                                 "status": status,
                             })
-                        return {"calls": calls, "source": "esl"}
+                        return {"calls": _filter_calls(calls), "source": "esl"}
                 except FreeSwitchESLError as e:
                     logger.warning("ESL falhou, tentando fallback: %s", e)
 
@@ -1436,7 +1474,7 @@ async def realtime_calls(user: dict = Depends(require_permission("realtime.view"
                                 "elapsed_sec": elapsed,
                                 "status": "incall" if is_answered else "ringing",
                             })
-                        return {"calls": calls, "source": "fusionpbx"}
+                        return {"calls": _filter_calls(calls), "source": "fusionpbx"}
             except ClientErr as e:
                 logger.warning("realtime/calls fallback %s falhou: %s", ctype, e)
             except Exception as e:
@@ -1455,7 +1493,7 @@ async def realtime_calls(user: dict = Depends(require_permission("realtime.view"
             "caller_number": "—",
             "direction": "inbound", "elapsed_sec": 0, "status": "incall",
         })
-    return {"calls": active, "source": "local"}
+    return {"calls": _filter_calls(active), "source": "local"}
 
 @api.post("/agents/cleanup-extensions")
 async def cleanup_extension_agents(user: dict = Depends(require_super_admin())):
@@ -1489,6 +1527,9 @@ async def list_agents(user: dict = Depends(require_permission("agents.view")),
     f = tenant_filter(user)
     if not include_extensions:
         f = {**f, "source": {"$ne": "extension"}}
+    allowed_ext = allowed_extensions_for(user)
+    if allowed_ext is not None:
+        f = {**f, "extension": {"$in": list(allowed_ext)}}
     items = await db.agents.find(f, {"_id": 0}).to_list(500)
     # Enrich with missed_count and avg_wait_sec (last 24h)
     cutoff_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
@@ -1662,9 +1703,13 @@ async def list_extensions(user: dict = Depends(get_current_user)):
         if existing and existing.get("source") == "call_center_agent":
             continue
         agent_by_ext[ext_k] = a
+    # Apply per-user extension whitelist (None = unrestricted)
+    allowed_ext = allowed_extensions_for(user)
     out = []
     for e in exts:
         ext = str(e.get("extension") or "")
+        if allowed_ext is not None and ext not in allowed_ext:
+            continue
         enabled_raw = e.get("enabled")
         if isinstance(enabled_raw, bool):
             enabled_val = enabled_raw
@@ -2289,6 +2334,17 @@ async def list_recordings(
         if not own_id: return {"recordings": []}
         q["agent_id"] = own_id
     elif agent_id: q["agent_id"] = agent_id
+    # Per-user extension whitelist (limits which agents' recordings are visible)
+    allowed_agent_ids = await allowed_agent_ids_for(user)
+    if allowed_agent_ids is not None:
+        if not allowed_agent_ids:
+            return {"recordings": []}
+        existing = q.get("agent_id")
+        if isinstance(existing, str):
+            if existing not in allowed_agent_ids:
+                return {"recordings": []}
+        else:
+            q["agent_id"] = {"$in": list(allowed_agent_ids)}
     if queue_id: q["queue_id"] = queue_id
     if search:
         q["$or"] = [
@@ -2328,6 +2384,9 @@ async def get_recording(rec_id: str, user: dict = Depends(get_current_user)):
     if not r: raise HTTPException(status_code=404, detail="Gravação não encontrada")
     if "recordings.view_all" not in perms and r.get("agent_id") != user.get("agent_id"):
         raise HTTPException(status_code=403, detail="Sem permissão para esta gravação")
+    allowed_agent_ids = await allowed_agent_ids_for(user)
+    if allowed_agent_ids is not None and r.get("agent_id") not in allowed_agent_ids:
+        raise HTTPException(status_code=403, detail="Sem permissão para esta gravação")
     return r
 
 class NoteUpdate(BaseModel):
@@ -2349,8 +2408,20 @@ def _period_cutoff(period: str) -> datetime:
 async def _build_report(user: dict, report_type: str, period: str, agent_id: Optional[str], queue_id: Optional[str]):
     cutoff = _period_cutoff(period).isoformat()
     f = tenant_filter(user)
+    # Per-user extension whitelist limits which agents/calls are visible
+    allowed_agent_ids = await allowed_agent_ids_for(user)
+    allowed_ext = allowed_extensions_for(user)
+    agent_filter = {**f}
+    if allowed_ext is not None:
+        agent_filter["extension"] = {"$in": list(allowed_ext)}
+    call_filter = {**f}
+    if allowed_agent_ids is not None:
+        if not allowed_agent_ids:
+            # No allowed agents → empty result
+            return {"title": "Relatório", "columns": [], "rows": []}
+        call_filter["agent_id"] = {"$in": list(allowed_agent_ids)}
     if report_type == "agents":
-        agents = await db.agents.find(f, {"_id": 0}).to_list(500)
+        agents = await db.agents.find(agent_filter, {"_id": 0}).to_list(500)
         if agent_id: agents = [a for a in agents if a["id"] == agent_id]
         rows = []
         for a in agents:
@@ -2406,7 +2477,7 @@ async def _build_report(user: dict, report_type: str, period: str, agent_id: Opt
             {"key": "sla_pct", "label": "SLA %"}, {"key": "avg_wait_sec", "label": "TME (s)"},
         ], "rows": rows}
     if report_type == "calls":
-        q = {**f, "started_at": {"$gte": cutoff}}
+        q = {**call_filter, "started_at": {"$gte": cutoff}}
         if agent_id: q["agent_id"] = agent_id
         if queue_id: q["queue_id"] = queue_id
         docs = await db.calls.find(q, {"_id": 0}).sort("started_at", -1).to_list(2000)
@@ -2423,7 +2494,7 @@ async def _build_report(user: dict, report_type: str, period: str, agent_id: Opt
             {"key": "duration_sec", "label": "Duração (s)"}, {"key": "wait_sec", "label": "Espera (s)"},
         ], "rows": rows}
     if report_type == "abandoned":
-        q = {**f, "disposition": {"$in": ["missed", "abandoned"]}, "started_at": {"$gte": cutoff}}
+        q = {**call_filter, "disposition": {"$in": ["missed", "abandoned"]}, "started_at": {"$gte": cutoff}}
         if agent_id: q["agent_id"] = agent_id
         if queue_id: q["queue_id"] = queue_id
         docs = await db.calls.find(q, {"_id": 0}).sort("started_at", -1).to_list(2000)
@@ -2437,7 +2508,7 @@ async def _build_report(user: dict, report_type: str, period: str, agent_id: Opt
             {"key": "caller_number", "label": "Número"}, {"key": "wait_sec", "label": "Espera (s)"},
         ], "rows": rows}
     if report_type == "recordings":
-        q = {**f, "started_at": {"$gte": cutoff}}
+        q = {**call_filter, "started_at": {"$gte": cutoff}}
         if agent_id: q["agent_id"] = agent_id
         if queue_id: q["queue_id"] = queue_id
         docs = await db.recordings.find(q, {"_id": 0}).sort("started_at", -1).to_list(2000)
@@ -2451,7 +2522,7 @@ async def _build_report(user: dict, report_type: str, period: str, agent_id: Opt
             {"key": "duration_sec", "label": "Duração (s)"}, {"key": "size_mb", "label": "Tamanho (MB)"},
         ], "rows": rows}
     if report_type == "hourly":
-        q = {**f, "started_at": {"$gte": cutoff}}
+        q = {**call_filter, "started_at": {"$gte": cutoff}}
         if agent_id: q["agent_id"] = agent_id
         if queue_id: q["queue_id"] = queue_id
         docs = await db.calls.find(q, {"_id": 0, "started_at": 1, "disposition": 1}).to_list(5000)
@@ -2665,6 +2736,9 @@ async def _build_report(user: dict, report_type: str, period: str, agent_id: Opt
 @api.get("/reports/agents")
 async def reports_agents(user: dict = Depends(require_permission("reports.view"))):
     f = tenant_filter(user)
+    allowed_ext = allowed_extensions_for(user)
+    if allowed_ext is not None:
+        f = {**f, "extension": {"$in": list(allowed_ext)}}
     agents = await db.agents.find(f, {"_id": 0}).to_list(500)
     cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
     rows = []
@@ -3595,6 +3669,9 @@ async def stream_recording_endpoint(recording_id: str, request: Request,
     if user.get("role") == "agent" and not user.get("permissions"):
         if rec.get("agent_id") != user.get("agent_id"):
             raise HTTPException(status_code=403, detail="Sem permissão para esta gravação")
+    allowed_agent_ids = await allowed_agent_ids_for(user)
+    if allowed_agent_ids is not None and rec.get("agent_id") not in allowed_agent_ids:
+        raise HTTPException(status_code=403, detail="Sem permissão para esta gravação")
 
     tid = rec.get("tenant_id")
     s = await db.fusionpbx_settings.find_one({"tenant_id": tid})

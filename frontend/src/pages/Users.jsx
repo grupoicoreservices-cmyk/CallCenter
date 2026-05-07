@@ -32,6 +32,7 @@ export default function Users() {
   const [permsMeta, setPermsMeta] = useState({ permissions: [], defaults: {}, roles: [] });
   const [agentEntities, setAgentEntities] = useState([]);
   const [queues, setQueues] = useState([]);
+  const [extensions, setExtensions] = useState([]);
   const [search, setSearch] = useState("");
   const [editing, setEditing] = useState(null); // null | "new" | userObj
   const [confirmDel, setConfirmDel] = useState(null);
@@ -40,16 +41,18 @@ export default function Users() {
   async function load() {
     setLoading(true);
     try {
-      const [u, p, a, q] = await Promise.all([
+      const [u, p, a, q, x] = await Promise.all([
         api.get("/users"),
         api.get("/permissions"),
         api.get("/agents").catch(() => ({ data: { agents: [] } })),
         api.get("/queues").catch(() => ({ data: { queues: [] } })),
+        api.get("/extensions").catch(() => ({ data: { extensions: [] } })),
       ]);
       setUsers(u.data.users);
       setPermsMeta(p.data);
       setAgentEntities(a.data.agents || []);
       setQueues(q.data.queues || []);
+      setExtensions(x.data.extensions || []);
     } catch (e) {
       toast.error("Falha ao carregar usuários");
     } finally {
@@ -172,6 +175,7 @@ export default function Users() {
         permsMeta={permsMeta}
         agentEntities={agentEntities}
         queues={queues}
+        extensions={extensions}
         onClose={() => setEditing(null)}
         onSaved={() => { setEditing(null); load(); }}
       />
@@ -194,12 +198,13 @@ export default function Users() {
   );
 }
 
-function UserFormDialog({ open, editing, permsMeta, agentEntities, queues, onClose, onSaved }) {
+function UserFormDialog({ open, editing, permsMeta, agentEntities, queues, extensions, onClose, onSaved }) {
   const isNew = editing === "new";
   const initial = useMemo(() => {
     if (isNew || !editing) return {
       name: "", email: "", password: "", role: "agent",
       permissions: null, active: true, agent_id: null,
+      allowed_extensions: [],
       // Provisioning fields
       provision_extension: false, extension_number: "", extension_sip_password: "",
       provision_pbx_user: false, pbx_password: "",
@@ -212,6 +217,7 @@ function UserFormDialog({ open, editing, permsMeta, agentEntities, queues, onClo
       permissions: editing.is_custom_permissions ? [...editing.permissions] : null,
       active: editing.active !== false,
       agent_id: editing.agent_id || null,
+      allowed_extensions: editing.allowed_extensions ? [...editing.allowed_extensions] : [],
       provision_extension: false, extension_number: "", extension_sip_password: "",
       provision_pbx_user: false, pbx_password: "",
       provision_call_center_agent: false, cc_agent_id: "",
@@ -267,6 +273,7 @@ function UserFormDialog({ open, editing, permsMeta, agentEntities, queues, onClo
         role: form.role,
         active: form.active,
         permissions: form.role === "admin" ? null : (useDefaults ? null : (form.permissions || [])),
+        allowed_extensions: form.role === "admin" ? [] : (form.allowed_extensions || []),
         agent_id: form.role === "agent" ? (form.agent_id || null) : null,
       };
       if (isNew) {
@@ -521,6 +528,35 @@ function UserFormDialog({ open, editing, permsMeta, agentEntities, queues, onClo
           )}
         </div>
 
+        {form.role !== "admin" && (
+          <div className="border-t border-border pt-4">
+            <div className="flex items-center justify-between mb-2">
+              <div>
+                <div className="text-[10px] text-muted-foreground uppercase tracking-widest font-medium">Ramais visíveis</div>
+                <h4 className="font-display font-semibold">
+                  {form.allowed_extensions.length === 0 ? "Vê todos os ramais" : `${form.allowed_extensions.length} ramal(is) permitido(s)`}
+                </h4>
+                <p className="text-[11px] text-muted-foreground mt-0.5">
+                  Restringe quais ramais este usuário enxerga em Ramais/Agentes, Tempo Real, Gravações e Relatórios.
+                  Deixe em branco para ver tudo. Administradores sempre veem todos.
+                </p>
+              </div>
+              {form.allowed_extensions.length > 0 && (
+                <Button variant="ghost" size="sm" type="button"
+                  onClick={() => setForm((f) => ({ ...f, allowed_extensions: [] }))}
+                  data-testid="uf-allowed-ext-clear">
+                  <RotateCcw size={12} className="mr-1.5" /> Permitir todos
+                </Button>
+              )}
+            </div>
+            <AllowedExtensionsPicker
+              extensions={extensions || []}
+              value={form.allowed_extensions}
+              onChange={(v) => setForm({ ...form, allowed_extensions: v })}
+            />
+          </div>
+        )}
+
         {/* Permissions */}
         <div className="border-t border-border pt-4">
           <div className="flex items-center justify-between mb-3">
@@ -574,6 +610,82 @@ function UserFormDialog({ open, editing, permsMeta, agentEntities, queues, onClo
         )}
       </DialogContent>
     </Dialog>
+  );
+}
+
+function AllowedExtensionsPicker({ extensions, value, onChange }) {
+  const [search, setSearch] = useState("");
+  const selected = new Set((value || []).map(String));
+  const filtered = extensions.filter((e) => {
+    if (!search.trim()) return true;
+    const s = search.toLowerCase();
+    return (e.extension || "").toLowerCase().includes(s)
+      || (e.caller_id_name || "").toLowerCase().includes(s)
+      || (e.agent_name || "").toLowerCase().includes(s);
+  });
+
+  function toggle(ext) {
+    const next = new Set(selected);
+    if (next.has(String(ext))) next.delete(String(ext));
+    else next.add(String(ext));
+    onChange(Array.from(next));
+  }
+  function selectAll() { onChange(filtered.map((e) => String(e.extension))); }
+  function clearAll() { onChange([]); }
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2">
+        <div className="relative flex-1">
+          <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
+          <Input value={search} onChange={(e) => setSearch(e.target.value)}
+            placeholder="Filtrar por ramal, nome ou agente…"
+            className="pl-8 h-8 text-xs" data-testid="uf-allowed-ext-search" />
+        </div>
+        <Button variant="ghost" size="sm" type="button" onClick={selectAll}
+          data-testid="uf-allowed-ext-all" className="text-xs">
+          Marcar visíveis
+        </Button>
+        <Button variant="ghost" size="sm" type="button" onClick={clearAll}
+          data-testid="uf-allowed-ext-none" className="text-xs">
+          Limpar
+        </Button>
+      </div>
+
+      <div className="border border-border rounded bg-white max-h-56 overflow-y-auto" data-testid="uf-allowed-ext-list">
+        {extensions.length === 0 ? (
+          <div className="text-xs text-muted-foreground p-4 text-center">
+            Nenhum ramal encontrado. Verifique a integração FusionPBX em Central PBX.
+          </div>
+        ) : filtered.length === 0 ? (
+          <div className="text-xs text-muted-foreground p-3 text-center">
+            Nenhum ramal corresponde ao filtro.
+          </div>
+        ) : filtered.map((e) => {
+          const ext = String(e.extension);
+          const checked = selected.has(ext);
+          return (
+            <label key={e.uuid || ext}
+              className={`flex items-center gap-2 px-3 py-2 border-b border-border last:border-0 hover:bg-zinc-50 cursor-pointer text-xs ${checked ? "bg-emerald-50" : ""}`}
+              data-testid={`uf-allowed-ext-${ext}`}>
+              <input type="checkbox" checked={checked} onChange={() => toggle(ext)} />
+              <span className="font-mono font-bold w-14 text-foreground">{ext}</span>
+              <span className="flex-1 truncate">{e.agent_name || e.caller_id_name || "—"}</span>
+              {e.is_agent ? (
+                <span className="text-[10px] uppercase tracking-widest text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded">Agente</span>
+              ) : (
+                <span className="text-[10px] uppercase tracking-widest text-zinc-500 bg-zinc-100 px-1.5 py-0.5 rounded">Ramal</span>
+              )}
+            </label>
+          );
+        })}
+      </div>
+      {selected.size > 0 && (
+        <div className="text-[11px] text-muted-foreground">
+          Selecionados: <span className="font-mono text-foreground">{Array.from(selected).join(", ")}</span>
+        </div>
+      )}
+    </div>
   );
 }
 
