@@ -1588,6 +1588,59 @@ class AgentEditReq(BaseModel):
     sip_password: Optional[str] = None
     queue_uuids: Optional[List[str]] = None  # external_ids
 
+@api.post("/agents/{agent_id}/pbx-force-logout")
+async def pbx_force_logout(agent_id: str,
+                            user: dict = Depends(require_permission("agents.edit"))):
+    """Limpeza defensiva: força a remoção de TODOS os tiers e marca Logged Out
+    para qualquer agente em memória do mod_callcenter cujo nome corresponda à
+    extensão deste agente, em qualquer formato (`1001`, `1001@dominio`).
+    Use quando o agente fica 'preso' como Available/Waiting no FusionPBX
+    mesmo após o logout pelo Voxyra."""
+    f = tenant_filter(user)
+    agent = await db.agents.find_one({"id": agent_id, **f}, {"_id": 0})
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agente não encontrado")
+    tid = agent.get("tenant_id")
+    s = await db.fusionpbx_settings.find_one({"tenant_id": tid}) or {}
+    if not s.get("esl_host"):
+        raise HTTPException(status_code=400, detail="ESL não configurado")
+    ext = str(agent.get("extension") or "").strip()
+    if not ext:
+        raise HTTPException(status_code=400, detail="Agente sem ramal definido")
+    domain = s.get("domain_name") or None
+    esl = FreeSwitchESL(
+        host=s["esl_host"], port=int(s.get("esl_port") or 8021),
+        password=s.get("esl_password") or "ClueCon",
+        timeout=float(s.get("esl_timeout") or 5.0),
+    )
+    result = await esl.callcenter_force_clear_by_extension(ext, domain=domain)
+    # Reset DB state too
+    await db.agents.update_one(
+        {"id": agent_id},
+        {"$set": {"status": "offline",
+                  "pbx_status": "Logged Out",
+                  "active_queues": [],
+                  "status_changed_at": datetime.now(timezone.utc).isoformat()}})
+    # Update Postgres v_call_center_agents.agent_status if DB mode
+    if s.get("connection_type") == "db" and s.get("db_host") and agent.get("external_id"):
+        try:
+            client = FusionPBXDBClient(
+                host=s["db_host"], port=int(s.get("db_port") or 5432),
+                database=s.get("db_name") or "fusionpbx",
+                username=s["db_username"], password=s.get("db_password") or "",
+                domain_uuid=s.get("domain_uuid"), ssl=bool(s.get("db_ssl")),
+            )
+            try:
+                await client.update_agent_status(agent["external_id"], "Logged Out")
+            except Exception as e:
+                logger.warning("force_logout: DB status update failed: %s", e)
+        except Exception:
+            pass
+    await write_audit(user, "force_logout", "agent", agent_id,
+                       f"Force logout PBX · {agent.get('name')} ({ext})", result)
+    return {"ok": True, **result}
+
+
 @api.get("/agents/{agent_id}/pbx-state")
 async def get_agent_pbx_state(agent_id: str,
                                 user: dict = Depends(require_permission("agents.view"))):
@@ -2226,6 +2279,22 @@ async def agent_logout(request: Request):
             contact=parking_contact,
             clear_tiers=True,
         )
+    # Defensive: força a remoção de qualquer agente "preso" em memória do
+    # mod_callcenter cujo nome corresponda ao ramal anterior (qualquer formato).
+    # Resolve o caso onde o nome em memória difere do que enviamos
+    # (ex: UUID vs `<ext>@<dominio>`), o que é comum após reloads do PBX.
+    prev_ext = str(agent.get("extension") or "").strip()
+    if prev_ext and prev_ext != "999" and s.get("esl_host"):
+        try:
+            esl = FreeSwitchESL(
+                host=s["esl_host"], port=int(s.get("esl_port") or 8021),
+                password=s.get("esl_password") or "ClueCon",
+                timeout=float(s.get("esl_timeout") or 5.0),
+            )
+            await esl.callcenter_force_clear_by_extension(
+                prev_ext, domain=s.get("domain_name"))
+        except Exception as e:
+            logger.warning("logout force_clear_by_extension falhou: %s", e)
     await write_audit(user, "logout", "agent", aid,
                        f"{agent.get('name')} desconectou",
                        {"tiers_removed": tiers_removed, "pbx_logged_out": pbx_logged_out})

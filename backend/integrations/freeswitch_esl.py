@@ -227,6 +227,57 @@ class FreeSwitchESL:
                     pass
         return removed
 
+    async def callcenter_force_clear_by_extension(self, extension: str,
+                                                   domain: Optional[str] = None
+                                                   ) -> Dict[str, Any]:
+        """Defensive cleanup: removes all tiers and forces Logged Out for
+        ANY agent in mod_callcenter memory whose name matches the given
+        extension in ANY common format (`1001`, `1001@dominio`,
+        `1001@anything`). Use this when login/logoff commands aren't
+        taking effect because of name mismatch.
+        Returns: {tiers_removed, agents_logged_out, names_matched}"""
+        out: Dict[str, Any] = {"tiers_removed": [], "agents_logged_out": [],
+                                "names_matched": []}
+        ext = str(extension).strip()
+        if not ext:
+            return out
+        # 1) Build matchers (any agent_name starting with `ext` or `ext@`)
+        agents = await self.callcenter_agent_list()
+        matched_names = set()
+        for a in agents:
+            name = a.get("name") or ""
+            if name == ext or name.startswith(f"{ext}@"):
+                matched_names.add(name)
+        # Also try the exact composed name even if not in list (sometimes
+        # tier exists but agent removed)
+        if domain:
+            matched_names.add(f"{ext}@{domain}")
+        matched_names.add(ext)
+        out["names_matched"] = sorted(matched_names)
+        # 2) Remove tiers using each matched name
+        tiers = await self.callcenter_tier_list()
+        for t in tiers:
+            tname = t.get("agent") or ""
+            tqueue = t.get("queue") or ""
+            if not tqueue:
+                continue
+            # Match by exact name OR by extension prefix
+            if tname in matched_names or tname == ext or tname.startswith(f"{ext}@"):
+                try:
+                    await self.callcenter_tier_del(tqueue, tname)
+                    out["tiers_removed"].append({"queue": tqueue, "agent": tname})
+                except Exception:
+                    pass
+        # 3) Force Logged Out + Idle on each matched agent
+        for name in matched_names:
+            try:
+                await self.callcenter_agent_set(name, "status", "Logged Out")
+                await self.callcenter_agent_set(name, "state", "Idle")
+                out["agents_logged_out"].append(name)
+            except Exception:
+                pass
+        return out
+
     async def callcenter_agent_list(self) -> List[Dict[str, str]]:
         """Returns all agents (name, status, state, contact) in mod_callcenter MEMORY."""
         out = await self.api("callcenter_config agent list")

@@ -6,7 +6,7 @@ import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Button } from "../components/ui/button";
 import { Switch } from "../components/ui/switch";
-import { Search, Plus, Trash2, Loader2, Copy, KeyRound, Pencil, RefreshCw } from "lucide-react";
+import { Search, Plus, Trash2, Loader2, Copy, KeyRound, Pencil, RefreshCw, AlertTriangle } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "../components/ui/dialog";
 import { toast } from "sonner";
 import { useAuth } from "../contexts/AuthContext";
@@ -49,6 +49,17 @@ export default function Agents() {
       if (data.errors?.length) data.errors.forEach(e => toast.warning(e));
       load();
     } catch (e) { toast.error(formatApiError(e.response?.data?.detail) || "Erro na sincronização"); }
+  }
+
+  async function handleForceLogout(a) {
+    if (!window.confirm(`Forçar logout do agente "${a.name}" (ramal ${a.extension})?\n\nIsso remove TODOS os tiers e marca o agente como Logged Out em memória do mod_callcenter, em qualquer formato de nome.\nUse quando o agente fica preso em "Available/Waiting" no FusionPBX mesmo após logout.`)) return;
+    try {
+      const { data } = await api.post(`/agents/${a.id}/pbx-force-logout`);
+      const removed = (data.tiers_removed || []).length;
+      const matched = (data.names_matched || []).length;
+      toast.success(`Logout forçado: ${removed} tier(s) removido(s) · ${matched} nome(s) processado(s)`);
+      load();
+    } catch (e) { toast.error(formatApiError(e.response?.data?.detail) || "Erro ao forçar logout"); }
   }
 
   function openNew() {
@@ -173,6 +184,11 @@ export default function Agents() {
                 {canEdit && a.external_id && (
                   <button onClick={() => handleResync(a)} className="text-zinc-500 hover:text-blue-600 p-1" title="Re-sincronizar com PBX" data-testid={`agent-resync-${a.id}`}>
                     <RefreshCw size={14} />
+                  </button>
+                )}
+                {canEdit && a.extension && (
+                  <button onClick={() => handleForceLogout(a)} className="text-zinc-500 hover:text-amber-600 p-1" title="Forçar logout no mod_callcenter (libera agente preso)" data-testid={`agent-force-logout-${a.id}`}>
+                    <AlertTriangle size={14} />
                   </button>
                 )}
                 {canEdit && (
