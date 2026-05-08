@@ -719,21 +719,46 @@ class FusionPBXDBClient:
             await conn.close()
 
     async def get_extension_full(self, extension_uuid: str) -> Optional[Dict[str, Any]]:
-        """Retorna todos os campos relevantes do ramal."""
+        """Retorna todos os campos relevantes do ramal. Adapta-se a versões
+        diferentes do FusionPBX (algumas colunas podem não existir)."""
+        wanted = [
+            "extension_uuid", "extension", "password",
+            "effective_caller_id_name", "effective_caller_id_number",
+            "outbound_caller_id_name", "outbound_caller_id_number",
+            "voicemail_enabled", "voicemail_password", "voicemail_mail_to",
+            "call_group", "pickup_group", "user_record", "description",
+            "enabled", "accountcode",
+        ]
         conn = await self._connect()
         try:
-            row = await conn.fetchrow(
-                """SELECT extension_uuid::text, extension, password,
-                          effective_caller_id_name, effective_caller_id_number,
-                          outbound_caller_id_name, outbound_caller_id_number,
-                          voicemail_enabled, voicemail_password, voicemail_mail_to,
-                          call_group, pickup_group, user_record, description,
-                          enabled, accountcode
-                   FROM v_extensions
-                   WHERE extension_uuid = $1::uuid AND domain_uuid = $2::uuid""",
-                extension_uuid, self.domain_uuid,
+            cols_rows = await conn.fetch(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name='v_extensions'")
+            avail = {r["column_name"] for r in cols_rows}
+            select_parts = []
+            for c in wanted:
+                if c not in avail:
+                    continue
+                if c == "extension_uuid":
+                    select_parts.append("extension_uuid::text AS extension_uuid")
+                else:
+                    select_parts.append(c)
+            if not select_parts:
+                return None
+            sql = (
+                f"SELECT {', '.join(select_parts)} "
+                f"FROM v_extensions "
+                f"WHERE extension_uuid = $1::uuid AND domain_uuid = $2::uuid"
             )
-            return dict(row) if row else None
+            row = await conn.fetchrow(sql, extension_uuid, self.domain_uuid)
+            if not row:
+                return None
+            d = dict(row)
+            # Garante que chaves não-existentes apareçam como None para o
+            # frontend não quebrar.
+            for c in wanted:
+                d.setdefault(c, None)
+            return d
         finally:
             await conn.close()
 

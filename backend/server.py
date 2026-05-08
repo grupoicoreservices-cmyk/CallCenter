@@ -1249,6 +1249,9 @@ async def pbx_get_extension(ext_uuid: str,
         d = await client.get_extension_full(ext_uuid)
     except FusionPBXDBError as e:
         raise HTTPException(status_code=502, detail=str(e))
+    except Exception as e:
+        logger.exception("get_extension_full crashed: %s", e)
+        raise HTTPException(status_code=500, detail=f"Erro lendo ramal: {e}")
     if not d:
         raise HTTPException(status_code=404, detail="Ramal não encontrado")
     return {"extension": d}

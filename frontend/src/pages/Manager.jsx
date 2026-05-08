@@ -198,22 +198,45 @@ function ExtensionEditDialog({ open, ext, onClose, onSaved }) {
       try {
         const { data: r } = await api.get(`/pbx/extensions/${ext.uuid}/full`);
         const d = r.extension || {};
+        const _str = (v) => (v === null || v === undefined ? "" : String(v));
+        const _bool = (v) => {
+          if (v === true || v === false) return v;
+          return _str(v).toLowerCase() === "true";
+        };
         setData({
-          caller_id_name: d.effective_caller_id_name || "",
-          caller_id_internal: d.effective_caller_id_number || "",
-          caller_id_external_name: d.outbound_caller_id_name || "",
-          caller_id_external: d.outbound_caller_id_number || "",
-          voicemail_enabled: (d.voicemail_enabled || "").toString().toLowerCase() === "true",
-          voicemail_password: d.voicemail_password || "",
-          voicemail_mail_to: d.voicemail_mail_to || "",
-          user_record: d.user_record || "none",
-          call_group: d.call_group || "",
-          pickup_group: d.pickup_group || "",
-          accountcode: d.accountcode || "",
-          description: d.description || "",
-          enabled: (d.enabled || "true").toString().toLowerCase() === "true",
+          caller_id_name: _str(d.effective_caller_id_name) || ext?.caller_id_name || "",
+          caller_id_internal: _str(d.effective_caller_id_number) || ext?.extension || "",
+          caller_id_external_name: _str(d.outbound_caller_id_name),
+          caller_id_external: _str(d.outbound_caller_id_number),
+          voicemail_enabled: _bool(d.voicemail_enabled),
+          voicemail_password: _str(d.voicemail_password),
+          voicemail_mail_to: _str(d.voicemail_mail_to),
+          user_record: _str(d.user_record) || "none",
+          call_group: _str(d.call_group),
+          pickup_group: _str(d.pickup_group),
+          accountcode: _str(d.accountcode),
+          description: _str(d.description) || ext?.description || "",
+          enabled: d.enabled === null || d.enabled === undefined ? true : _bool(d.enabled),
         });
-      } catch (e) { toast.error("Erro ao carregar"); }
+      } catch (e) {
+        toast.error(formatApiError(e.response?.data?.detail) || "Erro ao carregar ramal");
+        // Inicializa com defaults usando o que veio da listagem para não bloquear edição
+        setData({
+          caller_id_name: ext?.caller_id_name || "",
+          caller_id_internal: ext?.extension || "",
+          caller_id_external_name: "",
+          caller_id_external: "",
+          voicemail_enabled: false,
+          voicemail_password: "",
+          voicemail_mail_to: "",
+          user_record: "none",
+          call_group: "",
+          pickup_group: "",
+          accountcode: "",
+          description: ext?.description || "",
+          enabled: ext?.enabled !== false,
+        });
+      }
       finally { setLoading(false); }
     })();
   }, [open, ext]);
