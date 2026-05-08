@@ -2768,8 +2768,9 @@ async def list_extensions(user: dict = Depends(get_current_user)):
             exts = await client.list_extensions()
     except (FusionPBXDBError, FusionPBXError) as e:
         raise HTTPException(status_code=502, detail=str(e))
-    # Registrations via ESL (best-effort)
-    regs: Dict[str, bool] = {}
+    # Registrations via ESL (best-effort) — coleta IP interno/público,
+    # porta, transporte e user-agent (modelo) do telefone.
+    regs: Dict[str, Dict[str, Any]] = {}
     try:
         if s.get("esl_host"):
             esl = FreeSwitchESL(
@@ -2778,11 +2779,60 @@ async def list_extensions(user: dict = Depends(get_current_user)):
                 timeout=float(s.get("esl_timeout") or 5.0),
             )
             out = await esl.api("sofia status profile internal reg")
-            for line in (out or "").splitlines():
-                if "User:" in line:
-                    user_part = line.split("User:")[1].strip()
-                    ext = user_part.split("@")[0]
-                    regs[ext] = True
+            current: Dict[str, Any] = {}
+            current_ext: Optional[str] = None
+            for raw in (out or "").splitlines():
+                line = raw.strip()
+                # Início de novo bloco: linha "Registrations:" ou separador
+                if line.startswith("Registrations:") or line.startswith("Total items returned"):
+                    if current_ext:
+                        regs[current_ext] = current
+                    current_ext = None
+                    current = {}
+                    continue
+                if not line or line.startswith("==="):
+                    continue
+                # Campos: "Key: value"
+                if ":" in line:
+                    k, _, v = line.partition(":")
+                    k = k.strip().lower()
+                    v = v.strip()
+                    if k == "user":
+                        # finaliza bloco anterior
+                        if current_ext:
+                            regs[current_ext] = current
+                        current_ext = v.split("@")[0]
+                        current = {"registered": True, "sip_user": v}
+                    elif current_ext is not None:
+                        if k == "contact":
+                            # ex: "1001" <sip:1001@10.0.0.5:5060;transport=udp>
+                            import re as _re
+                            m = _re.search(r"sip:[^@]+@([\d.]+):(\d+)", v)
+                            if m:
+                                current["internal_ip"] = m.group(1)
+                                current["internal_port"] = int(m.group(2))
+                            t = _re.search(r"transport=(\w+)", v)
+                            if t:
+                                current["transport"] = t.group(1).lower()
+                        elif k == "agent":
+                            current["user_agent"] = v
+                        elif k == "ip":
+                            current["public_ip"] = v
+                        elif k == "port":
+                            try: current["public_port"] = int(v)
+                            except ValueError: pass
+                        elif k == "status":
+                            # "Registered(UDP)(unknown) EXP(...)"
+                            if "(" in v:
+                                proto = v.split("(", 1)[1].split(")", 1)[0]
+                                current.setdefault("transport", proto.lower())
+                            current["status"] = v.split(" ", 1)[0]
+                        elif k == "ping-status":
+                            current["ping"] = v
+                        elif k == "expires":
+                            current["expires"] = v
+            if current_ext:
+                regs[current_ext] = current
     except Exception as e:
         logger.warning("list_extensions: ESL regs falhou: %s", e)
     # Mark which agents are linked
@@ -2816,6 +2866,7 @@ async def list_extensions(user: dict = Depends(get_current_user)):
         linked = agent_by_ext.get(ext) or {}
         is_agent = linked.get("source") == "call_center_agent"
         seen_exts.add(ext)
+        reg = regs.get(ext) or {}
         out.append({
             "uuid": e.get("uuid") or e.get("extension_uuid"),
             "extension": ext,
@@ -2823,7 +2874,8 @@ async def list_extensions(user: dict = Depends(get_current_user)):
             "caller_id_number": e.get("caller_id_number") or e.get("effective_caller_id_number"),
             "enabled": enabled_val,
             "description": e.get("description"),
-            "registered": bool(regs.get(ext)),
+            "registered": bool(reg.get("registered")),
+            "registration": reg or None,
             "agent_name": linked.get("name"),
             "agent_id": linked.get("id") if is_agent else None,
             "is_agent": is_agent,
@@ -2848,7 +2900,8 @@ async def list_extensions(user: dict = Depends(get_current_user)):
             "caller_id_number": ext or None,
             "enabled": True,
             "description": "Agente Call Center (sem ramal SIP correspondente)",
-            "registered": bool(regs.get(ext)) if ext else False,
+            "registered": bool((regs.get(ext) or {}).get("registered")) if ext else False,
+            "registration": regs.get(ext) if ext else None,
             "agent_name": a.get("name"),
             "agent_id": a.get("id"),
             "is_agent": True,

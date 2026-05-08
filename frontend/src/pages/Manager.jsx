@@ -109,20 +109,50 @@ function ExtensionsTab() {
               <th className="px-4 py-3">Nome</th>
               <th className="px-4 py-3">Status</th>
               <th className="px-4 py-3">Reg. SIP</th>
+              <th className="px-4 py-3">IP / Porta</th>
+              <th className="px-4 py-3">Aparelho</th>
               <th className="px-4 py-3 text-right">Ações</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-border">
             {loading ? (
-              <tr><td colSpan={5} className="px-4 py-8 text-center text-muted-foreground">Carregando...</td></tr>
+              <tr><td colSpan={7} className="px-4 py-8 text-center text-muted-foreground">Carregando...</td></tr>
             ) : filtered.length === 0 ? (
-              <tr><td colSpan={5} className="px-4 py-8 text-center text-muted-foreground">Nenhum ramal.</td></tr>
+              <tr><td colSpan={7} className="px-4 py-8 text-center text-muted-foreground">Nenhum ramal.</td></tr>
             ) : filtered.map((r) => (
               <tr key={r.uuid} className="hover:bg-zinc-50" data-testid={`mgr-ext-row-${r.extension}`}>
                 <td className="px-4 py-3 font-mono font-bold">{r.extension}</td>
                 <td className="px-4 py-3">{r.caller_id_name || "—"}</td>
                 <td className="px-4 py-3 text-xs">{r.enabled ? <span className="text-emerald-700">Habilitado</span> : <span className="text-zinc-500">Desativado</span>}</td>
                 <td className="px-4 py-3 text-xs">{r.registered ? <span className="text-emerald-700">Online</span> : <span className="text-zinc-500">Offline</span>}</td>
+                <td className="px-4 py-3 text-[11px] font-mono">
+                  {r.registration ? (
+                    <div className="leading-tight">
+                      {r.registration.public_ip && (
+                        <div title="IP público">
+                          <span className="text-muted-foreground">pub:</span> {r.registration.public_ip}
+                          {r.registration.public_port ? `:${r.registration.public_port}` : ""}
+                        </div>
+                      )}
+                      {r.registration.internal_ip && r.registration.internal_ip !== r.registration.public_ip && (
+                        <div title="IP interno">
+                          <span className="text-muted-foreground">int:</span> {r.registration.internal_ip}
+                          {r.registration.internal_port ? `:${r.registration.internal_port}` : ""}
+                        </div>
+                      )}
+                      {r.registration.transport && (
+                        <div className="text-[10px] uppercase tracking-widest">
+                          <span className={`px-1 rounded ${r.registration.transport === 'tls' ? 'bg-emerald-100 text-emerald-700' : r.registration.transport === 'tcp' ? 'bg-blue-100 text-blue-700' : 'bg-zinc-100 text-zinc-700'}`}>
+                            {r.registration.transport}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  ) : <span className="text-zinc-400">—</span>}
+                </td>
+                <td className="px-4 py-3 text-[11px] text-muted-foreground max-w-[200px] truncate" title={r.registration?.user_agent}>
+                  {r.registration?.user_agent || "—"}
+                </td>
                 <td className="px-4 py-3 text-right">
                   <Button variant="ghost" size="sm" onClick={() => setEditing(r)}
                     data-testid={`mgr-ext-edit-${r.extension}`}>
