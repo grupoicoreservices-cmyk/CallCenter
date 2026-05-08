@@ -1430,29 +1430,6 @@ async def _get_db_client(user: dict) -> tuple[FusionPBXDBClient, dict]:
 
 
 
-    tid = await require_tenant_or_super(user)
-    s = await db.fusionpbx_settings.find_one({"tenant_id": tid}) or {}
-    # Aceita DB mesmo se connection_type=rest, desde que db_host/db_username
-    # estejam preenchidos. Manager exige acesso direto ao PostgreSQL.
-    if not s.get("db_host") or not s.get("db_username"):
-        raise HTTPException(
-            status_code=400,
-            detail=("Manager PBX requer credenciais PostgreSQL configuradas. "
-                    "Vá em Central PBX → preencha Host, Database, Usuário e Senha "
-                    "do PostgreSQL (mesmo que conexão principal seja REST)."))
-    if not s.get("domain_uuid"):
-        raise HTTPException(
-            status_code=400,
-            detail="Domain UUID do FusionPBX não configurado em Central PBX.")
-    client = FusionPBXDBClient(
-        host=s["db_host"], port=int(s.get("db_port") or 5432),
-        database=s.get("db_name") or "fusionpbx",
-        username=s["db_username"], password=s.get("db_password") or "",
-        domain_uuid=s.get("domain_uuid"), ssl=bool(s.get("db_ssl")),
-    )
-    return client, s
-
-
 @api.get("/pbx/extensions/{ext_uuid}/full")
 async def pbx_get_extension(ext_uuid: str,
                               user: dict = Depends(require_permission("pbx.manage"))):
@@ -2329,7 +2306,7 @@ async def create_user(body: UserCreate, user: dict = Depends(require_permission(
     needs_fpbx = body.provision_extension or body.provision_pbx_user or body.provision_call_center_agent
     if needs_fpbx:
         try:
-            fpbx_client, fpbx_settings = await _get_db_client(tid)
+            fpbx_client, fpbx_settings = await _get_db_client_by_tid(tid)
         except HTTPException as e:
             raise HTTPException(status_code=400, detail=f"Provisionamento FPBX requer modo PostgreSQL: {e.detail}")
         if not body.extension_number and (body.provision_extension or body.provision_call_center_agent):
@@ -5596,7 +5573,7 @@ def _gen_pwd(n: int = 10) -> str:
     return "".join(secrets.choice(alphabet) for _ in range(n))
 
 
-async def _get_db_client(tid: str):
+async def _get_db_client_by_tid(tid: str):
     """Returns (FusionPBXDBClient, settings). Only PostgreSQL mode supports provisioning."""
     s = await db.fusionpbx_settings.find_one({"tenant_id": tid})
     if not s:
@@ -5622,7 +5599,7 @@ async def provision_queue(body: ProvisionQueueReq,
     tid = await _resolve_tenant_for_fusion(user, tenant_id)
     if user.get("role") not in ("super_admin", "admin"):
         raise HTTPException(status_code=403, detail="Sem permissão")
-    client, _ = await _get_db_client(tid)
+    client, _ = await _get_db_client_by_tid(tid)
     try:
         result = await client.provision_queue(
             name=body.name, extension=str(body.extension),
@@ -5652,7 +5629,7 @@ async def provision_agent(body: ProvisionAgentReq,
     tid = await _resolve_tenant_for_fusion(user, tenant_id)
     if user.get("role") not in ("super_admin", "admin"):
         raise HTTPException(status_code=403, detail="Sem permissão")
-    client, settings = await _get_db_client(tid)
+    client, settings = await _get_db_client_by_tid(tid)
     domain_name = settings.get("domain_name") or ""
     agent_id = body.agent_id or str(body.extension)
     sip_password = body.sip_password or _gen_pwd(12)
@@ -5769,7 +5746,7 @@ async def deprovision_queue(queue_id: str,
         raise HTTPException(status_code=404, detail="Fila não encontrada")
     if q.get("external_id"):
         try:
-            client, _ = await _get_db_client(tid)
+            client, _ = await _get_db_client_by_tid(tid)
             await client.delete_queue(q["external_id"])
         except HTTPException:
             raise
@@ -5792,7 +5769,7 @@ async def deprovision_agent(agent_id: str,
         raise HTTPException(status_code=404, detail="Agente não encontrado")
     if a.get("external_id"):
         try:
-            client, _ = await _get_db_client(tid)
+            client, _ = await _get_db_client_by_tid(tid)
             await client.delete_call_center_agent(a["external_id"])
             try:
                 conn = await client._connect()
