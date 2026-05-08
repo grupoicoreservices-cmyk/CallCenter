@@ -13,7 +13,7 @@ import { api, formatApiError } from "../lib/api";
 import { toast } from "sonner";
 import {
   Phone, PhoneIncoming, Server, Award, Plus, Save, Trash2, Edit3,
-  Loader2, Search, RefreshCw, Mic, Voicemail, Eye, EyeOff,
+  Loader2, Search, RefreshCw, Mic, Voicemail, Eye, EyeOff, CheckCircle2, AlertCircle,
 } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
 
@@ -26,8 +26,65 @@ const TABS = [
 
 export default function Manager() {
   const [tab, setTab] = useState("ext");
+  const [health, setHealth] = useState(null);
+  const [healthExpanded, setHealthExpanded] = useState(false);
+
+  async function loadHealth() {
+    try {
+      const { data } = await api.get("/pbx/health");
+      setHealth(data);
+      // Auto-expande se algo está com problema
+      if (!data.all_ok) setHealthExpanded(true);
+    } catch (e) { /* sem permissão ou outro erro */ }
+  }
+  useEffect(() => { loadHealth(); }, []);
+
   return (
     <Layout title="Manager PBX" subtitle="Gerencie ramais, DIDs, troncos e licenças do FusionPBX">
+      {health && (
+        <div className={`border rounded-sm mb-4 overflow-hidden ${
+          health.all_ok ? "border-emerald-200 bg-emerald-50" : "border-amber-300 bg-amber-50"
+        }`} data-testid="mgr-health-banner">
+          <button onClick={() => setHealthExpanded(!healthExpanded)}
+            className="w-full px-4 py-3 flex items-center justify-between hover:bg-black/5 transition"
+            data-testid="mgr-health-toggle">
+            <div className="flex items-center gap-3">
+              {health.all_ok ? <CheckCircle2 size={18} className="text-emerald-600" /> : <AlertCircle size={18} className="text-amber-700" />}
+              <div className="text-left">
+                <div className="text-sm font-semibold">
+                  {health.all_ok ? "Integração FusionPBX 100% OK" : "Integração FusionPBX com pendências"}
+                </div>
+                <div className="text-[11px] text-muted-foreground">
+                  {health.checks.filter((c) => c.ok).length} de {health.checks.length} checks passaram · clique para detalhes
+                </div>
+              </div>
+            </div>
+            <RefreshCw size={14} className="text-muted-foreground" onClick={(e) => { e.stopPropagation(); loadHealth(); }} />
+          </button>
+          {healthExpanded && (
+            <div className="border-t border-current/20 bg-white/50 px-4 py-3 space-y-2">
+              {health.checks.map((c) => (
+                <div key={c.key} className="flex items-start gap-3 text-xs" data-testid={`mgr-health-${c.key}`}>
+                  {c.ok ? <CheckCircle2 size={14} className="text-emerald-600 mt-0.5 flex-shrink-0" />
+                        : <AlertCircle size={14} className="text-red-600 mt-0.5 flex-shrink-0" />}
+                  <div className="flex-1">
+                    <div className="font-medium">{c.label}</div>
+                    <div className={`text-[11px] font-mono ${c.ok ? "text-emerald-700" : "text-red-700"}`}>
+                      {c.detail}
+                    </div>
+                  </div>
+                </div>
+              ))}
+              {health.domain_name && (
+                <div className="text-[11px] text-muted-foreground border-t border-current/10 pt-2 mt-2">
+                  Tenant: <code className="bg-zinc-100 px-1 rounded">{health.domain_name}</code> · UUID: <code className="bg-zinc-100 px-1 rounded font-mono">{health.domain_uuid?.slice(0, 13)}...</code>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="border-b border-border mb-5 flex gap-1 overflow-x-auto">
         {TABS.map((t) => (
           <button key={t.k} onClick={() => setTab(t.k)}

@@ -1226,7 +1226,121 @@ async def audit_stats(user: dict = Depends(require_permission("audit.review")),
 
 
 # ---------- PBX Manager (ramais, DIDs, troncos) ----------
+@api.get("/pbx/health")
+async def pbx_health(user: dict = Depends(require_permission("pbx.manage"))):
+    """Verifica saúde da integração FusionPBX para o tenant atual.
+    Retorna status individual de PostgreSQL, Domain UUID, ESL e REST."""
+    tid = await require_tenant_or_super(user)
+    s = await db.fusionpbx_settings.find_one({"tenant_id": tid}) or {}
+    out = {
+        "tenant_id": tid,
+        "domain_name": s.get("domain_name"),
+        "domain_uuid": s.get("domain_uuid"),
+        "checks": [],
+    }
+    # 1. Domain UUID
+    out["checks"].append({
+        "key": "domain", "label": "Domain UUID configurado",
+        "ok": bool(s.get("domain_uuid")),
+        "detail": s.get("domain_uuid") or "Não configurado",
+    })
+    # 2. PostgreSQL
+    pg_ok = False; pg_detail = ""; pg_extra = {}
+    if not (s.get("db_host") and s.get("db_username")):
+        pg_detail = "Credenciais PostgreSQL não preenchidas"
+    else:
+        try:
+            client = FusionPBXDBClient(
+                host=s["db_host"], port=int(s.get("db_port") or 5432),
+                database=s.get("db_name") or "fusionpbx",
+                username=s["db_username"], password=s.get("db_password") or "",
+                domain_uuid=s.get("domain_uuid"), ssl=bool(s.get("db_ssl")),
+            )
+            conn = await client._connect()
+            try:
+                ext_count = await conn.fetchval(
+                    "SELECT COUNT(*) FROM v_extensions WHERE domain_uuid=$1::uuid",
+                    s.get("domain_uuid")) if s.get("domain_uuid") else 0
+                gw_count = await conn.fetchval(
+                    "SELECT COUNT(*) FROM v_gateways WHERE domain_uuid=$1::uuid",
+                    s.get("domain_uuid")) if s.get("domain_uuid") else 0
+                pg_extra = {"extensions": ext_count, "gateways": gw_count}
+                pg_ok = True
+                pg_detail = f"{ext_count} ramais · {gw_count} troncos"
+            finally:
+                await conn.close()
+        except Exception as e:
+            pg_detail = f"Falha: {str(e)[:200]}"
+    out["checks"].append({
+        "key": "postgres", "label": "PostgreSQL FusionPBX",
+        "ok": pg_ok, "detail": pg_detail, "extra": pg_extra,
+    })
+    # 3. ESL FreeSWITCH
+    esl_ok = False; esl_detail = ""
+    if not s.get("esl_host"):
+        esl_detail = "ESL não configurado"
+    else:
+        try:
+            esl = FreeSwitchESL(
+                host=s["esl_host"], port=int(s.get("esl_port") or 8021),
+                password=s.get("esl_password") or "ClueCon",
+                timeout=float(s.get("esl_timeout") or 5.0),
+            )
+            r = await esl.api("status")
+            esl_ok = bool(r and "+OK" not in r and "ERR" not in r[:10] or "UP" in (r or ""))
+            esl_detail = r.split("\n", 1)[0][:120] if r else "Sem resposta"
+        except Exception as e:
+            esl_detail = f"Falha: {str(e)[:200]}"
+    out["checks"].append({
+        "key": "esl", "label": "FreeSWITCH ESL",
+        "ok": esl_ok, "detail": esl_detail,
+    })
+    # 4. REST (best-effort, opcional)
+    if s.get("base_url"):
+        rest_ok = False; rest_detail = ""
+        try:
+            client = FusionPBXClient(
+                base_url=s["base_url"], api_key=s.get("api_key"),
+                username=s.get("username"), password=s.get("password"),
+                domain_uuid=s.get("domain_uuid"), domain_name=s.get("domain_name"),
+                verify_ssl=bool(s.get("verify_ssl", True)),
+            )
+            await client.list_extensions()
+            rest_ok = True
+            rest_detail = "OK"
+        except Exception as e:
+            rest_detail = f"Falha: {str(e)[:120]}"
+        out["checks"].append({
+            "key": "rest", "label": "FusionPBX REST API",
+            "ok": rest_ok, "detail": rest_detail,
+        })
+    out["all_ok"] = all(c["ok"] for c in out["checks"])
+    return out
+
+
 async def _get_db_client(user: dict) -> tuple[FusionPBXDBClient, dict]:
+    tid = await require_tenant_or_super(user)
+    s = await db.fusionpbx_settings.find_one({"tenant_id": tid}) or {}
+    if not s.get("db_host") or not s.get("db_username"):
+        raise HTTPException(
+            status_code=400,
+            detail=("Manager PBX requer credenciais PostgreSQL configuradas. "
+                    "Vá em Central PBX → preencha Host, Database, Usuário e Senha "
+                    "do PostgreSQL (mesmo que conexão principal seja REST)."))
+    if not s.get("domain_uuid"):
+        raise HTTPException(
+            status_code=400,
+            detail="Domain UUID do FusionPBX não configurado em Central PBX.")
+    client = FusionPBXDBClient(
+        host=s["db_host"], port=int(s.get("db_port") or 5432),
+        database=s.get("db_name") or "fusionpbx",
+        username=s["db_username"], password=s.get("db_password") or "",
+        domain_uuid=s.get("domain_uuid"), ssl=bool(s.get("db_ssl")),
+    )
+    return client, s
+
+
+
     tid = await require_tenant_or_super(user)
     s = await db.fusionpbx_settings.find_one({"tenant_id": tid}) or {}
     # Aceita DB mesmo se connection_type=rest, desde que db_host/db_username
