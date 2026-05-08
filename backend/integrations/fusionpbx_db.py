@@ -719,32 +719,24 @@ class FusionPBXDBClient:
             await conn.close()
 
     async def get_extension_full(self, extension_uuid: str) -> Optional[Dict[str, Any]]:
-        """Retorna todos os campos relevantes do ramal. Adapta-se a versões
-        diferentes do FusionPBX (algumas colunas podem não existir)."""
-        wanted = [
-            "extension_uuid", "extension", "password",
-            "effective_caller_id_name", "effective_caller_id_number",
-            "outbound_caller_id_name", "outbound_caller_id_number",
-            "voicemail_enabled", "voicemail_password", "voicemail_mail_to",
-            "call_group", "pickup_group", "user_record", "description",
-            "enabled", "accountcode",
-        ]
+        """Retorna TODAS as colunas do ramal em v_extensions. Adapta-se a
+        qualquer versão do FusionPBX. Útil para frontend mostrar campos extras
+        que possam variar entre versões."""
         conn = await self._connect()
         try:
             cols_rows = await conn.fetch(
                 "SELECT column_name FROM information_schema.columns "
-                "WHERE table_name='v_extensions'")
-            avail = {r["column_name"] for r in cols_rows}
+                "WHERE table_name='v_extensions' ORDER BY ordinal_position")
+            avail = [r["column_name"] for r in cols_rows]
+            if not avail:
+                return None
+            # Cast UUID/timestamp para text para serialização JSON
             select_parts = []
-            for c in wanted:
-                if c not in avail:
-                    continue
-                if c == "extension_uuid":
-                    select_parts.append("extension_uuid::text AS extension_uuid")
+            for c in avail:
+                if c.endswith("_uuid"):
+                    select_parts.append(f"{c}::text AS {c}")
                 else:
                     select_parts.append(c)
-            if not select_parts:
-                return None
             sql = (
                 f"SELECT {', '.join(select_parts)} "
                 f"FROM v_extensions "
@@ -754,10 +746,11 @@ class FusionPBXDBClient:
             if not row:
                 return None
             d = dict(row)
-            # Garante que chaves não-existentes apareçam como None para o
-            # frontend não quebrar.
-            for c in wanted:
-                d.setdefault(c, None)
+            # Stringifica datetime/date para JSON
+            from datetime import datetime as _dt, date as _date
+            for k, v in list(d.items()):
+                if isinstance(v, (_dt, _date)):
+                    d[k] = v.isoformat()
             return d
         finally:
             await conn.close()
