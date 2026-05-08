@@ -1240,16 +1240,13 @@ def _resolve_provisioning_dir() -> Path:
         p = Path(c)
         try:
             p.mkdir(parents=True, exist_ok=True)
-            # Valida que conseguimos escrever
             test_f = p / ".write_test"
             test_f.write_text("x")
             test_f.unlink()
             return p
-        except Exception as e:
-            logger.warning("PROVISIONING_DIR %s não disponível: %s", c, e)
+        except Exception:
+            # Logger ainda não está definido em tempo de import — silencioso
             continue
-    # Último fallback (não falha import): retorna /tmp mesmo sem mkdir
-    logger.error("Nenhum diretório de provisioning disponível, usando /tmp")
     return Path("/tmp")
 
 
