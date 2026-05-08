@@ -1225,11 +1225,35 @@ async def audit_stats(user: dict = Depends(require_permission("audit.review")),
 
 
 # ---------- Provisioning HTTP de Aparelhos SIP ----------
-PROVISIONING_DIR = Path(os.environ.get("PROVISIONING_DIR", "/var/lib/voxyra/provisioning"))
-try:
-    PROVISIONING_DIR.mkdir(parents=True, exist_ok=True)
-except Exception as _e:
-    logger.warning("Não consegui criar PROVISIONING_DIR %s: %s", PROVISIONING_DIR, _e)
+def _resolve_provisioning_dir() -> Path:
+    """Resolve o diretório de provisioning com fallbacks seguros para evitar
+    crash do backend quando o diretório padrão não tem permissão."""
+    candidates = [
+        os.environ.get("PROVISIONING_DIR"),
+        "/var/lib/voxyra/provisioning",
+        str(ROOT_DIR / "provisioning_files"),
+        "/tmp/voxyra-provisioning",
+    ]
+    for c in candidates:
+        if not c:
+            continue
+        p = Path(c)
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+            # Valida que conseguimos escrever
+            test_f = p / ".write_test"
+            test_f.write_text("x")
+            test_f.unlink()
+            return p
+        except Exception as e:
+            logger.warning("PROVISIONING_DIR %s não disponível: %s", c, e)
+            continue
+    # Último fallback (não falha import): retorna /tmp mesmo sem mkdir
+    logger.error("Nenhum diretório de provisioning disponível, usando /tmp")
+    return Path("/tmp")
+
+
+PROVISIONING_DIR = _resolve_provisioning_dir()
 
 
 class ProvisioningDeviceCreate(BaseModel):
