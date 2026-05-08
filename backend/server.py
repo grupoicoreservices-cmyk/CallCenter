@@ -1229,9 +1229,18 @@ async def audit_stats(user: dict = Depends(require_permission("audit.review")),
 async def _get_db_client(user: dict) -> tuple[FusionPBXDBClient, dict]:
     tid = await require_tenant_or_super(user)
     s = await db.fusionpbx_settings.find_one({"tenant_id": tid}) or {}
-    if not (s.get("connection_type") == "db" and s.get("db_host")):
-        raise HTTPException(status_code=400,
-                              detail="FusionPBX não configurado via PostgreSQL para este tenant")
+    # Aceita DB mesmo se connection_type=rest, desde que db_host/db_username
+    # estejam preenchidos. Manager exige acesso direto ao PostgreSQL.
+    if not s.get("db_host") or not s.get("db_username"):
+        raise HTTPException(
+            status_code=400,
+            detail=("Manager PBX requer credenciais PostgreSQL configuradas. "
+                    "Vá em Central PBX → preencha Host, Database, Usuário e Senha "
+                    "do PostgreSQL (mesmo que conexão principal seja REST)."))
+    if not s.get("domain_uuid"):
+        raise HTTPException(
+            status_code=400,
+            detail="Domain UUID do FusionPBX não configurado em Central PBX.")
     client = FusionPBXDBClient(
         host=s["db_host"], port=int(s.get("db_port") or 5432),
         database=s.get("db_name") or "fusionpbx",
