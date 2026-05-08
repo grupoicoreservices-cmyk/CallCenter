@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useRef } from "react";
 import Layout from "../components/Layout";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -10,7 +10,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from "../components/ui/dialog";
 import {
-  Plus, Save, Trash2, Copy, Smartphone, Download, RefreshCw, Loader2, Search, ExternalLink, Eye, EyeOff,
+  Plus, Save, Trash2, Copy, Smartphone, Download, RefreshCw, Loader2, Search, ExternalLink, Eye, EyeOff, Upload, FileText, AlertTriangle, CheckCircle2,
 } from "lucide-react";
 import { api, formatApiError } from "../lib/api";
 import { toast } from "sonner";
@@ -34,6 +34,7 @@ export default function Provisioning() {
   const [search, setSearch] = useState("");
   const [editing, setEditing] = useState(null); // null | "new" | device
   const [confirmDel, setConfirmDel] = useState(null);
+  const [bulkOpen, setBulkOpen] = useState(false);
 
   async function load() {
     setLoading(true);
@@ -116,6 +117,10 @@ export default function Provisioning() {
             <RefreshCw size={13} className={`mr-1.5 ${loading ? "animate-spin" : ""}`} />
             Atualizar
           </Button>
+          <Button variant="outline" size="sm" onClick={() => setBulkOpen(true)}
+            data-testid="prov-bulk-open">
+            <Upload size={13} className="mr-1.5" /> Importar CSV
+          </Button>
           <Button onClick={() => setEditing("new")} data-testid="prov-new">
             <Plus size={14} className="mr-1.5" /> Adicionar aparelho
           </Button>
@@ -192,6 +197,10 @@ export default function Provisioning() {
       <DeviceFormDialog open={editing !== null} editing={editing} vendors={vendors}
         onClose={() => setEditing(null)}
         onSaved={() => { setEditing(null); load(); }} />
+
+      <BulkImportDialog open={bulkOpen}
+        onClose={() => setBulkOpen(false)}
+        onImported={() => { setBulkOpen(false); load(); }} />
 
       <Dialog open={!!confirmDel} onOpenChange={(o) => !o && setConfirmDel(null)}>
         <DialogContent>
@@ -379,6 +388,202 @@ function DeviceFormDialog({ open, editing, vendors, onClose, onSaved }) {
           <Button onClick={save} disabled={saving} data-testid="prov-save">
             {saving ? <Loader2 size={14} className="mr-1.5 animate-spin" /> : <Save size={14} className="mr-1.5" />}
             {isNew ? "Criar e gerar config" : "Salvar e regerar"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+
+function BulkImportDialog({ open, onClose, onImported }) {
+  const [file, setFile] = useState(null);
+  const [uploading, setUploading] = useState(false);
+  const [result, setResult] = useState(null); // { ok, imported, devices } or { ok:false, errors, total_rows }
+  const [downloading, setDownloading] = useState(false);
+  const fileRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) {
+      setFile(null);
+      setResult(null);
+      setUploading(false);
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  }, [open]);
+
+  async function downloadTemplate() {
+    setDownloading(true);
+    try {
+      const res = await api.get("/provisioning/devices/template.csv", { responseType: "blob" });
+      const url = window.URL.createObjectURL(new Blob([res.data], { type: "text/csv" }));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "voxyra-provisioning-template.csv";
+      a.click();
+      window.URL.revokeObjectURL(url);
+      toast.success("Template baixado");
+    } catch (e) {
+      toast.error("Erro ao baixar template");
+    } finally { setDownloading(false); }
+  }
+
+  async function upload() {
+    if (!file) { toast.error("Selecione um arquivo CSV"); return; }
+    if (!file.name.toLowerCase().endsWith(".csv")) {
+      toast.error("Arquivo deve ser .csv"); return;
+    }
+    setUploading(true);
+    setResult(null);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await api.post("/provisioning/devices/bulk-import", fd, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      setResult(res.data);
+      toast.success(`${res.data.imported} aparelho(s) importado(s)`);
+    } catch (e) {
+      const data = e.response?.data;
+      if (data && Array.isArray(data.errors)) {
+        // Erro estruturado de validação
+        setResult({ ok: false, errors: data.errors, total_rows: data.total_rows, detail: data.detail });
+      } else {
+        toast.error(formatApiError(data?.detail) || "Erro ao importar CSV");
+        setResult(null);
+      }
+    } finally { setUploading(false); }
+  }
+
+  function done() {
+    if (result?.ok && result.imported > 0) {
+      onImported();
+    } else {
+      onClose();
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => !uploading && !o && onClose()}>
+      <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto" data-testid="prov-bulk-dialog">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Upload size={18} /> Importar aparelhos via CSV
+          </DialogTitle>
+          <DialogDescription>
+            Carregue um arquivo CSV para cadastrar vários aparelhos de uma vez.
+            Todas as linhas são validadas em conjunto: se qualquer MAC estiver
+            duplicado ou inválido, nenhum aparelho será importado.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4 py-2">
+          <div className="bg-zinc-50 border border-border rounded-sm p-3 text-xs space-y-2">
+            <div className="font-semibold flex items-center gap-1.5">
+              <FileText size={13} /> Formato esperado
+            </div>
+            <p className="text-muted-foreground">
+              Cabeçalho obrigatório (vírgula ou ponto-e-vírgula como separador):
+            </p>
+            <code className="block bg-white border border-zinc-200 px-2 py-1 font-mono text-[11px]">
+              mac_address,vendor,model,extension,display_name,password
+            </code>
+            <ul className="list-disc list-inside text-muted-foreground space-y-0.5 pl-1">
+              <li><strong>mac_address</strong>: 12 caracteres hex (com ou sem `:` `-`)</li>
+              <li><strong>vendor</strong>: yealink, cisco, polycom, siemens, flyvoice, grandstream</li>
+              <li><strong>extension</strong>: ramal numérico (2 a 8 dígitos)</li>
+              <li><strong>password</strong>: senha SIP — obrigatória</li>
+              <li>model e display_name são opcionais</li>
+            </ul>
+            <Button variant="outline" size="sm" onClick={downloadTemplate}
+              disabled={downloading}
+              data-testid="prov-bulk-template">
+              {downloading
+                ? <Loader2 size={13} className="mr-1.5 animate-spin" />
+                : <Download size={13} className="mr-1.5" />}
+              Baixar template CSV
+            </Button>
+          </div>
+
+          <div>
+            <Label>Arquivo CSV</Label>
+            <Input ref={fileRef} type="file" accept=".csv,text/csv"
+              onChange={(e) => { setFile(e.target.files?.[0] || null); setResult(null); }}
+              disabled={uploading}
+              data-testid="prov-bulk-file" />
+            {file && (
+              <div className="text-[11px] text-muted-foreground mt-1.5 font-mono">
+                {file.name} · {(file.size / 1024).toFixed(1)} KB
+              </div>
+            )}
+          </div>
+
+          {result && !result.ok && Array.isArray(result.errors) && (
+            <div className="border border-red-300 bg-red-50 rounded-sm p-3 text-xs"
+              data-testid="prov-bulk-errors">
+              <div className="font-semibold text-red-800 mb-2 flex items-center gap-1.5">
+                <AlertTriangle size={13} />
+                {result.detail || `${result.errors.length} erro(s) encontrado(s) em ${result.total_rows || result.errors.length} linha(s). Nada foi importado.`}
+              </div>
+              <div className="max-h-64 overflow-y-auto space-y-1">
+                {result.errors.map((er, idx) => (
+                  <div key={idx} className="bg-white border border-red-200 rounded-sm px-2 py-1.5">
+                    <div className="font-mono text-[11px] text-red-900">
+                      Linha {er.row}{er.mac ? ` · MAC ${er.mac}` : ""}
+                    </div>
+                    <ul className="list-disc list-inside text-[11px] text-red-700 mt-0.5">
+                      {(er.errors || []).map((m, j) => <li key={j}>{m}</li>)}
+                    </ul>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {result && result.ok && (
+            <div className="border border-emerald-300 bg-emerald-50 rounded-sm p-3 text-xs"
+              data-testid="prov-bulk-success">
+              <div className="font-semibold text-emerald-800 mb-2 flex items-center gap-1.5">
+                <CheckCircle2 size={13} />
+                {result.imported} aparelho(s) importado(s) com sucesso. Arquivos de configuração foram gerados automaticamente.
+              </div>
+              <div className="max-h-48 overflow-y-auto bg-white border border-emerald-200 rounded-sm">
+                <table className="w-full text-[11px]">
+                  <thead className="bg-emerald-100">
+                    <tr className="text-left">
+                      <th className="px-2 py-1">MAC</th>
+                      <th className="px-2 py-1">Ramal</th>
+                      <th className="px-2 py-1">Fabricante</th>
+                      <th className="px-2 py-1">Arquivo</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(result.devices || []).map((d, i) => (
+                      <tr key={i} className="border-t border-emerald-100">
+                        <td className="px-2 py-1 font-mono">{d.mac}</td>
+                        <td className="px-2 py-1 font-mono font-bold">{d.extension}</td>
+                        <td className="px-2 py-1 uppercase">{d.vendor}</td>
+                        <td className="px-2 py-1 font-mono">{d.filename}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={done} disabled={uploading}
+            data-testid="prov-bulk-close">
+            {result?.ok ? "Fechar" : "Cancelar"}
+          </Button>
+          <Button onClick={upload} disabled={uploading || !file || (result && result.ok)}
+            data-testid="prov-bulk-submit">
+            {uploading
+              ? <Loader2 size={14} className="mr-1.5 animate-spin" />
+              : <Upload size={14} className="mr-1.5" />}
+            Importar
           </Button>
         </DialogFooter>
       </DialogContent>

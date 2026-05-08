@@ -79,4 +79,5 @@ See `/app/memory/test_credentials.md`.
 
 ## Changelog (recent)
 - 2026-02: Fix — `GET /api/agents` agora exclui ramais por padrão (`include_extensions=False`). Ramais ficam exclusivamente em `/api/extensions`. Mantido parâmetro `?include_extensions=true` para compatibilidade/debug. (server.py list_agents)
+- 2026-05-08: **Provisionamento bulk via CSV** — Nova UI em `/provisioning` com botão "Importar CSV" e diálogo de upload. Endpoints: `GET /api/provisioning/devices/template.csv` (download de template) e `POST /api/provisioning/devices/bulk-import` (multipart). Validação all-or-nothing: se qualquer linha tiver MAC duplicado (planilha ou banco), MAC inválido, vendor inválido, ramal inválido ou senha vazia, NENHUM aparelho é importado e a lista completa de erros é retornada por linha. Aceita separador `,` ou `;`, e MAC com `:` `-` ou sem. Rollback automático em caso de falha de geração de arquivo.
 

@@ -2005,6 +2005,223 @@ async def provisioning_public(tenant_id: str, filename: str, request: Request):
                      media_type=dev.get("content_type") or "text/plain")
 
 
+# ---------- Provisioning Bulk Import (CSV) ----------
+PROVISIONING_CSV_COLUMNS = ["mac_address", "vendor", "model", "extension", "display_name", "password"]
+PROVISIONING_CSV_TEMPLATE = (
+    ",".join(PROVISIONING_CSV_COLUMNS) + "\n"
+    "001122AABBCC,yealink,T46U,9165,Paulo Barbosa,senha-secreta-123\n"
+    "AA11BB22CC33,cisco,6921,9166,Maria Silva,outra-senha-456\n"
+    "001122334455,polycom,VVX 411,9167,João Souza,senha789\n"
+)
+
+
+@api.get("/provisioning/devices/template.csv")
+async def provisioning_csv_template(user: dict = Depends(require_super_admin())):
+    """Baixa um modelo CSV pronto para preenchimento."""
+    headers = {
+        "Content-Disposition": 'attachment; filename="voxyra-provisioning-template.csv"',
+        "Content-Type": "text/csv; charset=utf-8",
+    }
+    return Response(content=PROVISIONING_CSV_TEMPLATE, media_type="text/csv", headers=headers)
+
+
+@api.post("/provisioning/devices/bulk-import")
+async def provisioning_bulk_import(file: UploadFile = File(...),
+                                     user: dict = Depends(require_super_admin())):
+    """Importa um lote de aparelhos via CSV.
+    Validação all-or-nothing: se QUALQUER linha estiver inválida ou tiver MAC
+    duplicado (na planilha ou no banco), nenhum aparelho é cadastrado e a lista
+    completa de erros é retornada."""
+    import csv as _csv
+    import io as _io
+
+    if not file.filename or not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Envie um arquivo .csv")
+
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Arquivo vazio")
+    if len(raw) > 2 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Arquivo muito grande (limite 2 MB)")
+
+    # Decodifica tolerando BOM e encoding latino
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        try:
+            text = raw.decode("latin-1")
+        except Exception:
+            raise HTTPException(status_code=400, detail="Encoding inválido (use UTF-8)")
+
+    # Detecta delimitador (vírgula ou ponto-e-vírgula)
+    sample = text[:2048]
+    try:
+        dialect = _csv.Sniffer().sniff(sample, delimiters=",;\t")
+        delim = dialect.delimiter
+    except Exception:
+        delim = ","
+
+    reader = _csv.DictReader(_io.StringIO(text), delimiter=delim)
+    if not reader.fieldnames:
+        raise HTTPException(status_code=400, detail="CSV sem cabeçalho")
+
+    # Normaliza nomes de colunas (lower, strip, sem BOM)
+    norm = {(c or "").strip().lower().lstrip("\ufeff"): (c or "") for c in reader.fieldnames}
+    missing = [c for c in PROVISIONING_CSV_COLUMNS if c not in norm]
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"CSV faltando colunas: {', '.join(missing)}. "
+                    f"Cabeçalho esperado: {', '.join(PROVISIONING_CSV_COLUMNS)}")
+
+    tid = await require_tenant_or_super(user)
+    errors: List[Dict[str, Any]] = []
+    parsed: List[Dict[str, Any]] = []
+    seen_macs: Dict[str, int] = {}
+
+    for idx, row in enumerate(reader, start=2):  # linha 1 = header
+        def _g(k: str) -> str:
+            return (row.get(norm[k], "") or "").strip()
+
+        mac_raw = _g("mac_address")
+        vendor = _g("vendor").lower()
+        model = _g("model")
+        extension = _g("extension")
+        display_name = _g("display_name")
+        password = _g("password")
+
+        # Linha vazia? ignora silenciosamente
+        if not any([mac_raw, vendor, extension, password]):
+            continue
+
+        row_errors: List[str] = []
+        mac_clean = "".join(c for c in mac_raw.lower() if c.isalnum())
+        if len(mac_clean) != 12 or not all(c in "0123456789abcdef" for c in mac_clean):
+            row_errors.append(f"MAC inválido: '{mac_raw}'")
+        if vendor not in PROVISIONING_VENDORS:
+            row_errors.append(
+                f"Fabricante inválido: '{vendor}'. Use um de: {', '.join(sorted(PROVISIONING_VENDORS.keys()))}")
+        if not extension or not extension.isdigit() or not (2 <= len(extension) <= 8):
+            row_errors.append(f"Ramal inválido: '{extension}' (use 2 a 8 dígitos)")
+        if not password:
+            row_errors.append("Senha SIP obrigatória")
+
+        if mac_clean and len(mac_clean) == 12:
+            if mac_clean in seen_macs:
+                row_errors.append(
+                    f"MAC duplicado dentro do CSV (também na linha {seen_macs[mac_clean]})")
+            else:
+                seen_macs[mac_clean] = idx
+
+        if row_errors:
+            errors.append({"row": idx, "mac": mac_raw, "errors": row_errors})
+            continue
+
+        parsed.append({
+            "row": idx,
+            "mac": mac_clean,
+            "vendor": vendor,
+            "model": model,
+            "extension": extension,
+            "auth_user": extension,
+            "auth_password": password,
+            "display_name": display_name,
+            "label": extension,
+            "domain": None,
+            "sip_server": None,
+            "sip_port": 5060,
+            "transport": "udp",
+            "codecs": ["PCMA", "PCMU", "G722"],
+            "notes": "",
+        })
+
+    if not parsed and not errors:
+        raise HTTPException(status_code=400, detail="CSV não contém linhas com dados")
+
+    # Verifica duplicados contra o banco (apenas se não houver erros estruturais)
+    if parsed:
+        macs = [p["mac"] for p in parsed]
+        existing = await db.provisioning_devices.find(
+            {"tenant_id": tid, "mac": {"$in": macs}}, {"_id": 0, "mac": 1, "extension": 1}
+        ).to_list(len(macs))
+        existing_map = {e["mac"]: e for e in existing}
+        for p in parsed:
+            if p["mac"] in existing_map:
+                ex = existing_map[p["mac"]]
+                errors.append({
+                    "row": p["row"], "mac": p["mac"],
+                    "errors": [f"MAC {p['mac']} já cadastrado neste tenant (ramal {ex.get('extension')})"]
+                })
+
+    if errors:
+        error_rows = {e["row"] for e in errors}
+        total_rows = len({p["row"] for p in parsed} | error_rows)
+        return Response(
+            content=__import__("json").dumps({
+                "ok": False,
+                "imported": 0,
+                "total_rows": total_rows,
+                "errors": errors,
+                "detail": f"{len(errors)} linha(s) com erro. Nenhum aparelho foi importado.",
+            }),
+            status_code=400, media_type="application/json")
+
+    # Tudo válido: insere em massa e gera arquivos
+    now = datetime.now(timezone.utc).isoformat()
+    inserted: List[Dict[str, Any]] = []
+    for p in parsed:
+        doc = {
+            "id": str(uuid.uuid4()),
+            "tenant_id": tid,
+            "mac": p["mac"],
+            "vendor": p["vendor"],
+            "model": p["model"],
+            "extension": p["extension"],
+            "auth_user": p["auth_user"],
+            "auth_password": p["auth_password"],
+            "display_name": p["display_name"],
+            "label": p["label"],
+            "domain": None,
+            "sip_server": None,
+            "sip_port": 5060,
+            "transport": "udp",
+            "codecs": p["codecs"],
+            "notes": "",
+            "created_at": now,
+            "updated_at": now,
+            "created_by": user.get("email"),
+        }
+        try:
+            gen = await _generate_provisioning_file(tid, doc)
+            doc.update({
+                "filename": gen["filename"],
+                "url": gen["url"],
+                "content_type": gen["content_type"],
+                "last_provisioned_at": now,
+            })
+            await db.provisioning_devices.insert_one(doc)
+            doc.pop("_id", None)
+            inserted.append({"mac": doc["mac"], "extension": doc["extension"],
+                              "vendor": doc["vendor"], "filename": doc["filename"]})
+        except Exception as ex:
+            # Rollback: remove os já inseridos para preservar o all-or-nothing
+            for ins in inserted:
+                await db.provisioning_devices.delete_one(
+                    {"tenant_id": tid, "mac": ins["mac"]})
+                old_path = PROVISIONING_DIR / tid / ins["filename"]
+                try: old_path.unlink(missing_ok=True)
+                except Exception: pass
+            raise HTTPException(
+                status_code=500,
+                detail=f"Erro ao gerar arquivo do MAC {p['mac']} (linha {p['row']}): {ex}. "
+                        f"Importação revertida.")
+
+    await write_audit(user, "bulk_import", "provisioning_device", "csv",
+                       f"{len(inserted)} aparelhos importados",
+                       {"count": len(inserted)})
+    return {"ok": True, "imported": len(inserted), "devices": inserted}
+
+
 # ---------- Users ----------
 class UserCreate(BaseModel):
     email: str; password: str; name: str
