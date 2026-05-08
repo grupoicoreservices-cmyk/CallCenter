@@ -299,6 +299,7 @@ ALL_PERMISSIONS = [
     {"key": "tenant.settings",      "label": "Configurar empresa (tenant)",   "group": "Administração"},
     {"key": "audit.review",         "label": "Auditar gravações (QA)",        "group": "Auditoria"},
     {"key": "pbx.manage",           "label": "Gerenciar PBX (ramais, DIDs, troncos)", "group": "PBX"},
+    {"key": "dialer.use",           "label": "Discar do Voxyra (Click2Call)", "group": "PBX"},
 ]
 
 DEFAULT_PERMISSIONS_BY_ROLE = {
@@ -312,7 +313,7 @@ DEFAULT_PERMISSIONS_BY_ROLE = {
         "agents.view", "agents.edit",
     ],
     "agent": ["dashboard.view", "recordings.view_own", "reports.view",
-              "agent.change_extension"],
+              "agent.change_extension", "dialer.use"],
 }
 
 # Built-in roles (não podem ser deletados, mas as permissões podem ser editadas)
@@ -1316,6 +1317,94 @@ async def pbx_health(user: dict = Depends(require_permission("pbx.manage"))):
         })
     out["all_ok"] = all(c["ok"] for c in out["checks"])
     return out
+
+
+# ---------- Click2Call ----------
+class Click2CallReq(BaseModel):
+    destination: str
+    extension: Optional[str] = None  # default: extension do user agent
+    caller_id_name: Optional[str] = None
+    caller_id_number: Optional[str] = None
+
+    @validator("destination")
+    def _d(cls, v):
+        v = (v or "").strip().replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+        if not v or not all(c.isdigit() or c in "+*#" for c in v):
+            raise ValueError("Destino inválido")
+        return v
+
+
+@api.post("/dialer/click2call")
+async def dialer_click2call(body: Click2CallReq,
+                              user: dict = Depends(require_permission("dialer.use"))):
+    """Originate via ESL: toca no ramal do agente; quando ele atende, conecta
+    ao destino. Funciona com qualquer telefone SIP registrado."""
+    tid = await require_tenant_or_super(user)
+    s = await db.fusionpbx_settings.find_one({"tenant_id": tid}) or {}
+    if not s.get("esl_host"):
+        raise HTTPException(status_code=400, detail="ESL não configurado para este tenant")
+    domain = s.get("domain_name") or ""
+    if not domain:
+        raise HTTPException(status_code=400, detail="domain_name do tenant não configurado")
+    # Resolve extension do agente
+    ext = (body.extension or "").strip()
+    if not ext and user.get("agent_id"):
+        a = await db.agents.find_one({"id": user["agent_id"]}, {"_id": 0, "extension": 1})
+        ext = str((a or {}).get("extension") or "")
+    if not ext or not ext.isdigit():
+        raise HTTPException(status_code=400,
+                              detail="Sem ramal definido. Faça login com ramal antes de discar.")
+    # Caller-ID: se não informado, usa o do agente (do v_extensions outbound_caller_id_*)
+    cid_name = body.caller_id_name or (user.get("name") or "")
+    cid_num = body.caller_id_number or ext
+    # Monta originate. Variáveis garantem caller-id e contexto da empresa.
+    vars_ = (
+        f"{{origination_caller_id_name='{cid_name}',"
+        f"origination_caller_id_number='{cid_num}',"
+        f"sip_h_X-Voxyra-Origin='click2call',"
+        f"ignore_early_media=true}}"
+    )
+    leg_a = f"{vars_}user/{ext}@{domain}"
+    leg_b = f"{body.destination} XML {domain}"
+    cmd = f"originate {leg_a} {leg_b}"
+    esl = FreeSwitchESL(
+        host=s["esl_host"], port=int(s.get("esl_port") or 8021),
+        password=s.get("esl_password") or "ClueCon",
+        timeout=float(s.get("esl_timeout") or 10.0),
+    )
+    try:
+        result = await esl.api(cmd)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"ESL falhou: {e}")
+    ok = bool(result and (result.startswith("+OK") or "uuid" in (result or "").lower()))
+    await write_audit(user, "click2call", "call", body.destination,
+                       f"{ext} → {body.destination}",
+                       {"extension": ext, "destination": body.destination,
+                         "result": (result or "")[:200], "ok": ok})
+    if not ok:
+        return {"ok": False, "result": result, "command": cmd}
+    return {"ok": True, "result": (result or "").strip(),
+             "extension": ext, "destination": body.destination}
+
+
+@api.post("/dialer/hangup")
+async def dialer_hangup(uuid: str,
+                          user: dict = Depends(require_permission("dialer.use"))):
+    """Encerra uma chamada ativa pelo UUID."""
+    tid = await require_tenant_or_super(user)
+    s = await db.fusionpbx_settings.find_one({"tenant_id": tid}) or {}
+    if not s.get("esl_host"):
+        raise HTTPException(status_code=400, detail="ESL não configurado")
+    esl = FreeSwitchESL(
+        host=s["esl_host"], port=int(s.get("esl_port") or 8021),
+        password=s.get("esl_password") or "ClueCon",
+        timeout=5.0,
+    )
+    try:
+        result = await esl.api(f"uuid_kill {uuid}")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"ESL: {e}")
+    return {"ok": True, "result": result}
 
 
 async def _get_db_client(user: dict) -> tuple[FusionPBXDBClient, dict]:

@@ -1,4 +1,5 @@
 import Sidebar from "./Sidebar";
+import FloatingDialer from "./FloatingDialer";
 
 export default function Layout({ title, subtitle, actions, children }) {
   return (
@@ -17,6 +18,7 @@ export default function Layout({ title, subtitle, actions, children }) {
         </header>
         <div className="px-8 py-6">{children}</div>
       </main>
+      <FloatingDialer />
     </div>
   );
 }
