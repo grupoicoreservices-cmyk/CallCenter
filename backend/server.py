@@ -298,6 +298,7 @@ ALL_PERMISSIONS = [
     {"key": "users.manage",         "label": "Gerenciar usuários",            "group": "Administração"},
     {"key": "tenant.settings",      "label": "Configurar empresa (tenant)",   "group": "Administração"},
     {"key": "audit.review",         "label": "Auditar gravações (QA)",        "group": "Auditoria"},
+    {"key": "pbx.manage",           "label": "Gerenciar PBX (ramais, DIDs, troncos)", "group": "PBX"},
 ]
 
 DEFAULT_PERMISSIONS_BY_ROLE = {
@@ -1222,6 +1223,291 @@ async def audit_stats(user: dict = Depends(require_permission("audit.review")),
     rows.sort(key=lambda r: -r["avg_score"])
     return {"total": total, "avg_score": avg, "by_agent": rows,
              "score_distribution": dist}
+
+
+# ---------- PBX Manager (ramais, DIDs, troncos) ----------
+async def _get_db_client(user: dict) -> tuple[FusionPBXDBClient, dict]:
+    tid = await require_tenant_or_super(user)
+    s = await db.fusionpbx_settings.find_one({"tenant_id": tid}) or {}
+    if not (s.get("connection_type") == "db" and s.get("db_host")):
+        raise HTTPException(status_code=400,
+                              detail="FusionPBX não configurado via PostgreSQL para este tenant")
+    client = FusionPBXDBClient(
+        host=s["db_host"], port=int(s.get("db_port") or 5432),
+        database=s.get("db_name") or "fusionpbx",
+        username=s["db_username"], password=s.get("db_password") or "",
+        domain_uuid=s.get("domain_uuid"), ssl=bool(s.get("db_ssl")),
+    )
+    return client, s
+
+
+@api.get("/pbx/extensions/{ext_uuid}/full")
+async def pbx_get_extension(ext_uuid: str,
+                              user: dict = Depends(require_permission("pbx.manage"))):
+    client, _ = await _get_db_client(user)
+    try:
+        d = await client.get_extension_full(ext_uuid)
+    except FusionPBXDBError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    if not d:
+        raise HTTPException(status_code=404, detail="Ramal não encontrado")
+    return {"extension": d}
+
+
+class ExtensionFullUpdate(BaseModel):
+    caller_id_name: Optional[str] = None
+    caller_id_internal: Optional[str] = None
+    caller_id_external: Optional[str] = None
+    caller_id_external_name: Optional[str] = None
+    voicemail_enabled: Optional[bool] = None
+    voicemail_password: Optional[str] = None
+    voicemail_mail_to: Optional[str] = None
+    user_record: Optional[str] = None  # all|inbound|outbound|local|none
+    call_group: Optional[str] = None
+    pickup_group: Optional[str] = None
+    accountcode: Optional[str] = None  # category
+    description: Optional[str] = None
+    enabled: Optional[bool] = None
+
+
+@api.put("/pbx/extensions/{ext_uuid}")
+async def pbx_update_extension(ext_uuid: str, body: ExtensionFullUpdate,
+                                  user: dict = Depends(require_permission("pbx.manage"))):
+    client, _ = await _get_db_client(user)
+    try:
+        ok = await client.update_extension_full(
+            ext_uuid, {k: v for k, v in body.dict().items() if v is not None})
+    except FusionPBXDBError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    await write_audit(user, "update", "extension", ext_uuid,
+                       f"Update extension {ext_uuid}", body.dict(exclude_unset=True))
+    return {"ok": ok}
+
+
+class ExtensionCreateReq(BaseModel):
+    extension: str
+    sip_password: str
+    caller_id_name: str
+    caller_id_number: Optional[str] = ""
+    description: Optional[str] = ""
+
+
+@api.post("/pbx/extensions")
+async def pbx_create_extension(body: ExtensionCreateReq,
+                                  user: dict = Depends(require_permission("pbx.manage"))):
+    client, settings = await _get_db_client(user)
+    # Enforce license: max_extensions
+    tid = await require_tenant_or_super(user)
+    tenant = await db.tenants.find_one({"id": tid}) or {}
+    max_ext = int(tenant.get("max_extensions") or 0)
+    if max_ext > 0:
+        try:
+            current = len(await client.list_extensions())
+        except Exception:
+            current = 0
+        if current >= max_ext:
+            raise HTTPException(status_code=403,
+                                  detail=f"Limite de {max_ext} ramais atingido. "
+                                          f"Solicite aumento ao Super Admin.")
+    try:
+        out = await client.provision_extension(
+            extension=body.extension, sip_password=body.sip_password,
+            caller_id_name=body.caller_id_name,
+            caller_id_number=body.caller_id_number or body.extension,
+            description=body.description or "",
+        )
+    except FusionPBXDBError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    await write_audit(user, "create", "extension", out["extension_uuid"],
+                       f"Ramal {body.extension}", {"name": body.caller_id_name})
+    return {"ok": True, **out}
+
+
+@api.delete("/pbx/extensions/{ext_uuid}")
+async def pbx_delete_extension(ext_uuid: str,
+                                  user: dict = Depends(require_permission("pbx.manage"))):
+    client, _ = await _get_db_client(user)
+    try:
+        await client.delete_extension(ext_uuid)
+    except FusionPBXDBError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    await write_audit(user, "delete", "extension", ext_uuid, "Ramal removido", {})
+    return {"ok": True}
+
+
+# ---------- DIDs (Inbound Routes) ----------
+class DIDCreate(BaseModel):
+    did_number: str
+    target_extension: str
+    name: Optional[str] = None
+    enabled: bool = True
+    description: Optional[str] = ""
+
+
+@api.get("/pbx/dids")
+async def pbx_list_dids(user: dict = Depends(require_permission("pbx.manage"))):
+    client, _ = await _get_db_client(user)
+    try:
+        rows = await client.list_dialplan_inbound()
+    except FusionPBXDBError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    return {"dids": rows}
+
+
+@api.post("/pbx/dids")
+async def pbx_create_did(body: DIDCreate,
+                            user: dict = Depends(require_permission("pbx.manage"))):
+    client, _ = await _get_db_client(user)
+    # License: max_dids
+    tid = await require_tenant_or_super(user)
+    tenant = await db.tenants.find_one({"id": tid}) or {}
+    max_dids = int(tenant.get("max_dids") or 0)
+    if max_dids > 0:
+        try:
+            existing = await client.list_dialplan_inbound()
+            if len(existing) >= max_dids:
+                raise HTTPException(status_code=403,
+                                      detail=f"Limite de {max_dids} DIDs atingido.")
+        except FusionPBXDBError:
+            pass
+    try:
+        uuid_ = await client.upsert_dialplan_inbound(
+            did_number=body.did_number, target_extension=body.target_extension,
+            name=body.name, enabled=body.enabled, description=body.description or "")
+    except FusionPBXDBError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    # Reload XML para ativar
+    s = await db.fusionpbx_settings.find_one({"tenant_id": tid}) or {}
+    if s.get("esl_host"):
+        try:
+            esl = FreeSwitchESL(host=s["esl_host"], port=int(s.get("esl_port") or 8021),
+                                  password=s.get("esl_password") or "ClueCon",
+                                  timeout=float(s.get("esl_timeout") or 5.0))
+            await esl.api("reloadxml")
+        except Exception as e:
+            logger.warning("DID reloadxml falhou: %s", e)
+    await write_audit(user, "create", "did", uuid_,
+                       f"DID {body.did_number} → {body.target_extension}", body.dict())
+    return {"ok": True, "uuid": uuid_}
+
+
+@api.put("/pbx/dids/{did_uuid}")
+async def pbx_update_did(did_uuid: str, body: DIDCreate,
+                            user: dict = Depends(require_permission("pbx.manage"))):
+    client, _ = await _get_db_client(user)
+    try:
+        await client.upsert_dialplan_inbound(
+            did_number=body.did_number, target_extension=body.target_extension,
+            name=body.name, enabled=body.enabled,
+            description=body.description or "", existing_uuid=did_uuid)
+    except FusionPBXDBError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    tid = await require_tenant_or_super(user)
+    s = await db.fusionpbx_settings.find_one({"tenant_id": tid}) or {}
+    if s.get("esl_host"):
+        try:
+            esl = FreeSwitchESL(host=s["esl_host"], port=int(s.get("esl_port") or 8021),
+                                  password=s.get("esl_password") or "ClueCon",
+                                  timeout=float(s.get("esl_timeout") or 5.0))
+            await esl.api("reloadxml")
+        except Exception:
+            pass
+    await write_audit(user, "update", "did", did_uuid,
+                       f"DID {body.did_number} → {body.target_extension}", body.dict())
+    return {"ok": True}
+
+
+@api.delete("/pbx/dids/{did_uuid}")
+async def pbx_delete_did(did_uuid: str,
+                            user: dict = Depends(require_permission("pbx.manage"))):
+    client, _ = await _get_db_client(user)
+    try:
+        await client.delete_dialplan_inbound(did_uuid)
+    except FusionPBXDBError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    tid = await require_tenant_or_super(user)
+    s = await db.fusionpbx_settings.find_one({"tenant_id": tid}) or {}
+    if s.get("esl_host"):
+        try:
+            esl = FreeSwitchESL(host=s["esl_host"], port=int(s.get("esl_port") or 8021),
+                                  password=s.get("esl_password") or "ClueCon",
+                                  timeout=float(s.get("esl_timeout") or 5.0))
+            await esl.api("reloadxml")
+        except Exception:
+            pass
+    await write_audit(user, "delete", "did", did_uuid, "DID removido", {})
+    return {"ok": True}
+
+
+# ---------- Trunks (Gateways) ----------
+@api.get("/pbx/trunks")
+async def pbx_list_trunks(user: dict = Depends(require_permission("pbx.manage"))):
+    client, _ = await _get_db_client(user)
+    try:
+        rows = await client.list_gateways()
+    except FusionPBXDBError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    return {"trunks": rows}
+
+
+# ---------- Licenças do tenant ----------
+@api.get("/pbx/licenses")
+async def pbx_get_licenses(user: dict = Depends(require_permission("pbx.manage"))):
+    tid = await require_tenant_or_super(user)
+    tenant = await db.tenants.find_one({"id": tid}, {"_id": 0}) or {}
+    # Contagem real
+    used_ext = used_dids = used_trunks = 0
+    try:
+        client, _ = await _get_db_client(user)
+        try:
+            used_ext = len(await client.list_extensions())
+        except Exception:
+            pass
+        try:
+            used_dids = len(await client.list_dialplan_inbound())
+        except Exception:
+            pass
+        try:
+            used_trunks = len(await client.list_gateways())
+        except Exception:
+            pass
+    except HTTPException:
+        pass
+    return {
+        "limits": {
+            "max_extensions": int(tenant.get("max_extensions") or 0),
+            "max_dids": int(tenant.get("max_dids") or 0),
+            "max_trunks": int(tenant.get("max_trunks") or 0),
+            "max_users": int(tenant.get("max_users") or 0),
+        },
+        "used": {
+            "extensions": used_ext, "dids": used_dids, "trunks": used_trunks,
+            "users": await db.users.count_documents({"tenant_id": tid}),
+        },
+    }
+
+
+class LicenseUpdate(BaseModel):
+    max_extensions: Optional[int] = None
+    max_dids: Optional[int] = None
+    max_trunks: Optional[int] = None
+    max_users: Optional[int] = None
+
+
+@api.put("/pbx/licenses/{tenant_id}")
+async def pbx_update_licenses(tenant_id: str, body: LicenseUpdate,
+                                  user: dict = Depends(require_super_admin())):
+    """Apenas super_admin altera limites de licença."""
+    tenant = await db.tenants.find_one({"id": tenant_id})
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant não encontrado")
+    update = {k: v for k, v in body.dict().items() if v is not None}
+    if not update:
+        raise HTTPException(status_code=400, detail="Nada para atualizar")
+    await db.tenants.update_one({"id": tenant_id}, {"$set": update})
+    await write_audit(user, "update", "tenant_licenses", tenant_id,
+                       f"Limites atualizados", update)
+    return {"ok": True, "limits": update}
 
 
 # ---------- Provisioning HTTP de Aparelhos SIP ----------

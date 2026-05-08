@@ -22,6 +22,7 @@ import Users from "./pages/Users";
 import RoleTemplates from "./pages/RoleTemplates";
 import Auditoria from "./pages/Auditoria";
 import Provisioning from "./pages/Provisioning";
+import Manager from "./pages/Manager";
 import AuditLogs from "./pages/AuditLogs";
 import Tenants from "./pages/Tenants";
 import Plans from "./pages/Plans";
@@ -59,6 +60,7 @@ function App() {
             <Route path="/role-templates" element={<ProtectedRoute hint="master"><RoleTemplates /></ProtectedRoute>} />
             <Route path="/auditoria" element={<ProtectedRoute hint="master"><Auditoria /></ProtectedRoute>} />
             <Route path="/provisioning" element={<ProtectedRoute hint="master"><Provisioning /></ProtectedRoute>} />
+            <Route path="/manager" element={<ProtectedRoute hint="master"><Manager /></ProtectedRoute>} />
             <Route path="/audit" element={<ProtectedRoute hint="master"><AuditLogs /></ProtectedRoute>} />
             <Route path="/tenants" element={<ProtectedRoute requireSuperAdmin hint="admin"><Tenants /></ProtectedRoute>} />
             <Route path="/plans" element={<ProtectedRoute requireSuperAdmin hint="admin"><Plans /></ProtectedRoute>} />

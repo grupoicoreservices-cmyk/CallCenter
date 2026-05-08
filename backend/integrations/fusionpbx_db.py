@@ -717,3 +717,212 @@ class FusionPBXDBClient:
             )
         finally:
             await conn.close()
+
+    async def get_extension_full(self, extension_uuid: str) -> Optional[Dict[str, Any]]:
+        """Retorna todos os campos relevantes do ramal."""
+        conn = await self._connect()
+        try:
+            row = await conn.fetchrow(
+                """SELECT extension_uuid::text, extension, password,
+                          effective_caller_id_name, effective_caller_id_number,
+                          outbound_caller_id_name, outbound_caller_id_number,
+                          voicemail_enabled, voicemail_password, voicemail_mail_to,
+                          call_group, pickup_group, user_record, description,
+                          enabled, accountcode
+                   FROM v_extensions
+                   WHERE extension_uuid = $1::uuid AND domain_uuid = $2::uuid""",
+                extension_uuid, self.domain_uuid,
+            )
+            return dict(row) if row else None
+        finally:
+            await conn.close()
+
+    async def update_extension_full(self, extension_uuid: str,
+                                      fields: Dict[str, Any]) -> bool:
+        """Atualiza campos do ramal. Aceita: caller_id_name, caller_id_internal,
+        caller_id_external, voicemail_enabled, voicemail_password, voicemail_mail_to,
+        user_record, call_group, pickup_group, accountcode, description, enabled."""
+        if not extension_uuid:
+            raise FusionPBXDBError("extension_uuid obrigatório")
+        conn = await self._connect()
+        try:
+            cols_rows = await conn.fetch(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name='v_extensions'")
+            avail = {r["column_name"] for r in cols_rows}
+            mapping = {
+                "caller_id_name":      ("effective_caller_id_name", str),
+                "caller_id_internal":  ("effective_caller_id_number", str),
+                "caller_id_external_name": ("outbound_caller_id_name", str),
+                "caller_id_external":  ("outbound_caller_id_number", str),
+                "voicemail_enabled":   ("voicemail_enabled", lambda v: "true" if v else "false"),
+                "voicemail_password":  ("voicemail_password", str),
+                "voicemail_mail_to":   ("voicemail_mail_to", str),
+                "user_record":         ("user_record", str),  # all|inbound|outbound|local|none
+                "call_group":          ("call_group", str),
+                "pickup_group":        ("pickup_group", str),
+                "accountcode":         ("accountcode", str),
+                "description":         ("description", str),
+                "enabled":             ("enabled", lambda v: "true" if v else "false"),
+            }
+            sets, vals = [], []
+            for k, v in fields.items():
+                if k not in mapping or v is None:
+                    continue
+                col, conv = mapping[k]
+                if col not in avail:
+                    continue
+                vals.append(conv(v))
+                sets.append(f"{col} = ${len(vals)}")
+            if not sets:
+                return False
+            vals.append(extension_uuid)
+            vals.append(self.domain_uuid)
+            sql = (
+                f"UPDATE v_extensions SET {', '.join(sets)} "
+                f"WHERE extension_uuid = ${len(vals)-1}::uuid "
+                f"AND domain_uuid = ${len(vals)}::uuid"
+            )
+            res = await conn.execute(sql, *vals)
+            return "UPDATE" in res
+        finally:
+            await conn.close()
+
+    async def list_dialplan_inbound(self) -> List[Dict[str, Any]]:
+        """Lista DIDs inbound (registros em v_dialplans com category='Inbound route')."""
+        conn = await self._connect()
+        try:
+            rows = await conn.fetch(
+                """SELECT dialplan_uuid::text, dialplan_name, dialplan_number,
+                          dialplan_continue, dialplan_context, dialplan_order,
+                          dialplan_enabled, dialplan_description
+                   FROM v_dialplans
+                   WHERE domain_uuid = $1::uuid AND dialplan_category = 'Inbound route'
+                   ORDER BY dialplan_number, dialplan_name""",
+                self.domain_uuid,
+            )
+            out = []
+            for r in rows:
+                d = dict(r)
+                d["uuid"] = d.pop("dialplan_uuid")
+                # buscar primeiro action transfer/bridge
+                acts = await conn.fetch(
+                    """SELECT dialplan_action_uuid::text, dialplan_app, dialplan_data, dialplan_order
+                       FROM v_dialplan_details
+                       WHERE dialplan_uuid = $1::uuid AND dialplan_detail_tag = 'action'
+                       ORDER BY dialplan_detail_order""",
+                    d["uuid"],
+                )
+                d["actions"] = [dict(a) for a in acts]
+                # destino simplificado: pega o transfer
+                target = None
+                for a in acts:
+                    if a["dialplan_app"] == "transfer":
+                        target = (a["dialplan_data"] or "").split(" ")[0]
+                        break
+                d["target"] = target
+                out.append(d)
+            return out
+        finally:
+            await conn.close()
+
+    async def upsert_dialplan_inbound(self, did_number: str, target_extension: str,
+                                       name: Optional[str] = None,
+                                       enabled: bool = True,
+                                       description: str = "",
+                                       existing_uuid: Optional[str] = None) -> str:
+        """Cria/atualiza um DID inbound em v_dialplans com action transfer
+        para target_extension (ramal/fila)."""
+        if not self.domain_uuid:
+            raise FusionPBXDBError("domain_uuid obrigatório")
+        import uuid as _uuid
+        conn = await self._connect()
+        try:
+            label = name or f"DID {did_number} -> {target_extension}"
+            ctx = await conn.fetchval(
+                "SELECT domain_name FROM v_domains WHERE domain_uuid = $1::uuid",
+                self.domain_uuid)
+            ctx = ctx or "public"
+            if existing_uuid:
+                dp_uuid = existing_uuid
+                await conn.execute(
+                    """UPDATE v_dialplans SET dialplan_name=$1, dialplan_number=$2,
+                          dialplan_enabled=$3, dialplan_description=$4
+                       WHERE dialplan_uuid=$5::uuid AND domain_uuid=$6::uuid""",
+                    label, str(did_number), "true" if enabled else "false",
+                    description, dp_uuid, self.domain_uuid,
+                )
+                # Limpa actions/conditions antigas
+                await conn.execute(
+                    "DELETE FROM v_dialplan_details WHERE dialplan_uuid=$1::uuid",
+                    dp_uuid,
+                )
+            else:
+                dp_uuid = str(_uuid.uuid4())
+                await conn.execute(
+                    """INSERT INTO v_dialplans
+                       (dialplan_uuid, domain_uuid, dialplan_context,
+                        dialplan_category, dialplan_name, dialplan_number,
+                        dialplan_continue, dialplan_order, dialplan_enabled,
+                        dialplan_description)
+                       VALUES ($1::uuid, $2::uuid, $3, 'Inbound route', $4, $5,
+                               'false', 100, $6, $7)""",
+                    dp_uuid, self.domain_uuid, "public", label,
+                    str(did_number), "true" if enabled else "false", description,
+                )
+            # Condition: destination_number = ^DID$
+            cond_uuid = str(_uuid.uuid4())
+            await conn.execute(
+                """INSERT INTO v_dialplan_details
+                   (dialplan_detail_uuid, dialplan_uuid, domain_uuid,
+                    dialplan_detail_tag, dialplan_detail_type, dialplan_detail_data,
+                    dialplan_detail_order, dialplan_detail_enabled)
+                   VALUES ($1::uuid, $2::uuid, $3::uuid, 'condition',
+                           'destination_number', $4, 10, 'true')""",
+                cond_uuid, dp_uuid, self.domain_uuid,
+                f"^{did_number}$",
+            )
+            # Action: transfer XXXX XML domain
+            act_uuid = str(_uuid.uuid4())
+            await conn.execute(
+                """INSERT INTO v_dialplan_details
+                   (dialplan_detail_uuid, dialplan_uuid, domain_uuid,
+                    dialplan_detail_tag, dialplan_detail_type, dialplan_detail_data,
+                    dialplan_detail_order, dialplan_detail_enabled)
+                   VALUES ($1::uuid, $2::uuid, $3::uuid, 'action',
+                           'transfer', $4, 20, 'true')""",
+                act_uuid, dp_uuid, self.domain_uuid,
+                f"{target_extension} XML {ctx}",
+            )
+            return dp_uuid
+        finally:
+            await conn.close()
+
+    async def delete_dialplan_inbound(self, dialplan_uuid: str) -> None:
+        conn = await self._connect()
+        try:
+            await conn.execute(
+                "DELETE FROM v_dialplan_details WHERE dialplan_uuid=$1::uuid AND domain_uuid=$2::uuid",
+                dialplan_uuid, self.domain_uuid)
+            await conn.execute(
+                "DELETE FROM v_dialplans WHERE dialplan_uuid=$1::uuid AND domain_uuid=$2::uuid",
+                dialplan_uuid, self.domain_uuid)
+        finally:
+            await conn.close()
+
+    async def list_gateways(self) -> List[Dict[str, Any]]:
+        """Lista troncos SIP (gateways) do tenant."""
+        conn = await self._connect()
+        try:
+            rows = await conn.fetch(
+                """SELECT gateway_uuid::text, gateway, username, realm, proxy,
+                          register, enabled, description
+                   FROM v_gateways
+                   WHERE domain_uuid = $1::uuid
+                   ORDER BY gateway""",
+                self.domain_uuid,
+            )
+            return [dict(r) for r in rows]
+        finally:
+            await conn.close()
+
