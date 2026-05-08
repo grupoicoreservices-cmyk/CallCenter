@@ -33,6 +33,10 @@ from integrations.fusionpbx_sftp import (
 from integrations.freeswitch_esl import (
     FreeSwitchESL, FreeSwitchESLError, normalize_esl_channel,
 )
+from integrations.provisioning_templates import (
+    render_config as render_provisioning_config,
+    VENDORS as PROVISIONING_VENDORS,
+)
 
 
 async def _pbx_resync_agent_from_db(tid: str, agent_external_id: str) -> Dict[str, Any]:
@@ -1218,6 +1222,265 @@ async def audit_stats(user: dict = Depends(require_permission("audit.review")),
     rows.sort(key=lambda r: -r["avg_score"])
     return {"total": total, "avg_score": avg, "by_agent": rows,
              "score_distribution": dist}
+
+
+# ---------- Provisioning HTTP de Aparelhos SIP ----------
+PROVISIONING_DIR = Path(os.environ.get("PROVISIONING_DIR", "/var/lib/voxyra/provisioning"))
+try:
+    PROVISIONING_DIR.mkdir(parents=True, exist_ok=True)
+except Exception as _e:
+    logger.warning("Não consegui criar PROVISIONING_DIR %s: %s", PROVISIONING_DIR, _e)
+
+
+class ProvisioningDeviceCreate(BaseModel):
+    mac: str
+    vendor: str          # yealink | cisco | polycom | siemens | flyvoice | grandstream
+    model: Optional[str] = ""
+    extension: str
+    auth_user: Optional[str] = None  # default = extension
+    auth_password: str
+    display_name: Optional[str] = ""
+    label: Optional[str] = ""
+    domain: Optional[str] = None     # se vazio, usa o domain_name do tenant
+    sip_server: Optional[str] = None # se vazio, usa o domain_name do tenant
+    sip_port: int = 5060
+    transport: str = "udp"           # udp | tcp | tls
+    codecs: List[str] = ["PCMA", "PCMU", "G722"]
+    notes: Optional[str] = ""
+    @validator("mac")
+    def _mac(cls, v):
+        m = "".join(c for c in (v or "").lower() if c.isalnum())
+        if len(m) != 12:
+            raise ValueError("MAC deve ter 12 caracteres hexadecimais")
+        return m
+    @validator("vendor")
+    def _v(cls, v):
+        if v not in PROVISIONING_VENDORS:
+            raise ValueError(f"Fabricante inválido. Use: {sorted(PROVISIONING_VENDORS.keys())}")
+        return v
+    @validator("transport")
+    def _t(cls, v):
+        if v not in ("udp", "tcp", "tls"):
+            raise ValueError("transport deve ser udp, tcp ou tls")
+        return v
+
+
+def _public_provisioning_url(tid: str, filename: str) -> str:
+    """URL HTTP pública pra o telefone consumir.
+    PROVISIONING_PUBLIC_URL deve apontar para o domínio público do Voxyra
+    (ex: https://callvoxysipbr01.voxyra.net.br). O caminho `/api/provisioning-files/`
+    é roteado para o backend automaticamente pelo ingress."""
+    base = os.environ.get("PROVISIONING_PUBLIC_URL")
+    if not base:
+        base = "<configure PROVISIONING_PUBLIC_URL no .env>"
+    return f"{base.rstrip('/')}/api/provisioning-files/{tid}/{filename}"
+
+
+async def _generate_provisioning_file(tid: str, dev: Dict[str, Any]) -> Dict[str, Any]:
+    """(Re)gera o arquivo no disco e retorna {filename, url, content_type}."""
+    # Resolve domain padrão do tenant se não informado
+    pbx_settings = await db.fusionpbx_settings.find_one({"tenant_id": tid}) or {}
+    domain = dev.get("domain") or pbx_settings.get("domain_name")
+    sip_server = dev.get("sip_server") or domain
+    cfg = {
+        "mac": dev["mac"],
+        "extension": dev["extension"],
+        "auth_user": dev.get("auth_user") or dev["extension"],
+        "auth_password": dev["auth_password"],
+        "display_name": dev.get("display_name") or "",
+        "label": dev.get("label") or dev["extension"],
+        "domain": domain or "",
+        "sip_server": sip_server or "",
+        "sip_port": dev.get("sip_port") or 5060,
+        "transport": dev.get("transport") or "udp",
+        "codecs": dev.get("codecs") or ["PCMA", "PCMU", "G722"],
+    }
+    fname, content, ct = render_provisioning_config(dev["vendor"], cfg)
+    tenant_dir = PROVISIONING_DIR / tid
+    tenant_dir.mkdir(parents=True, exist_ok=True)
+    fpath = tenant_dir / fname
+    fpath.write_text(content, encoding="utf-8")
+    # Permissões liberadas pro usuário do tftpd-hpa ler
+    try:
+        os.chmod(fpath, 0o644)
+    except Exception:
+        pass
+    return {"filename": fname, "content_type": ct, "url": _public_provisioning_url(tid, fname),
+             "size": len(content), "abs_path": str(fpath)}
+
+
+@api.get("/provisioning/vendors")
+async def provisioning_list_vendors(user: dict = Depends(require_super_admin())):
+    return {"vendors": [{"key": k, "label": v} for k, v in PROVISIONING_VENDORS.items()]}
+
+
+@api.get("/provisioning/devices")
+async def provisioning_list(user: dict = Depends(require_super_admin())):
+    tid = await require_tenant_or_super(user)
+    docs = await db.provisioning_devices.find({"tenant_id": tid}, {"_id": 0}).sort("created_at", -1).to_list(500)
+    # Garante URL atualizada (caso PROVISIONING_PUBLIC_URL tenha mudado)
+    for d in docs:
+        if d.get("filename"):
+            d["url"] = _public_provisioning_url(tid, d["filename"])
+    return {"devices": docs}
+
+
+@api.post("/provisioning/devices")
+async def provisioning_create(body: ProvisioningDeviceCreate,
+                                 user: dict = Depends(require_super_admin())):
+    tid = await require_tenant_or_super(user)
+    existing = await db.provisioning_devices.find_one(
+        {"tenant_id": tid, "mac": body.mac}, {"_id": 0})
+    if existing:
+        raise HTTPException(status_code=400,
+                              detail=f"MAC {body.mac} já cadastrado neste tenant")
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "tenant_id": tid,
+        **body.dict(),
+        "created_at": now,
+        "updated_at": now,
+        "created_by": user.get("email"),
+    }
+    gen = await _generate_provisioning_file(tid, doc)
+    doc.update({
+        "filename": gen["filename"],
+        "url": gen["url"],
+        "content_type": gen["content_type"],
+        "last_provisioned_at": now,
+    })
+    await db.provisioning_devices.insert_one(doc)
+    # Remove _id que Mongo adicionou ao doc original
+    doc.pop("_id", None)
+    await write_audit(user, "create", "provisioning_device", doc["id"],
+                       f"{body.vendor}/{body.model} · {body.mac} · ramal {body.extension}",
+                       {"vendor": body.vendor, "extension": body.extension})
+    return {"ok": True, "device": {k: v for k, v in doc.items() if k != "auth_password"}}
+
+
+@api.patch("/provisioning/devices/{dev_id}")
+async def provisioning_update(dev_id: str, body: ProvisioningDeviceCreate,
+                                 user: dict = Depends(require_super_admin())):
+    tid = await require_tenant_or_super(user)
+    existing = await db.provisioning_devices.find_one(
+        {"id": dev_id, "tenant_id": tid}, {"_id": 0})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Aparelho não encontrado")
+    now = datetime.now(timezone.utc).isoformat()
+    new_doc = {**existing, **body.dict(), "updated_at": now}
+    # Se MAC mudou, deletar arquivo antigo
+    if existing.get("mac") != body.mac:
+        if await db.provisioning_devices.find_one(
+            {"tenant_id": tid, "mac": body.mac, "id": {"$ne": dev_id}}):
+            raise HTTPException(status_code=400, detail=f"MAC {body.mac} já cadastrado")
+        old_fname = existing.get("filename")
+        if old_fname:
+            old_path = PROVISIONING_DIR / tid / old_fname
+            try: old_path.unlink(missing_ok=True)
+            except Exception: pass
+    gen = await _generate_provisioning_file(tid, new_doc)
+    new_doc.update({
+        "filename": gen["filename"], "url": gen["url"],
+        "content_type": gen["content_type"], "last_provisioned_at": now,
+    })
+    await db.provisioning_devices.update_one(
+        {"id": dev_id, "tenant_id": tid}, {"$set": new_doc})
+    new_doc.pop("_id", None)
+    await write_audit(user, "update", "provisioning_device", dev_id,
+                       f"{body.mac} · {body.extension}", {"changed": True})
+    return {"ok": True, "device": {k: v for k, v in new_doc.items() if k != "auth_password"}}
+
+
+@api.post("/provisioning/devices/{dev_id}/regenerate")
+async def provisioning_regenerate(dev_id: str,
+                                     user: dict = Depends(require_super_admin())):
+    tid = await require_tenant_or_super(user)
+    dev = await db.provisioning_devices.find_one(
+        {"id": dev_id, "tenant_id": tid}, {"_id": 0})
+    if not dev:
+        raise HTTPException(status_code=404, detail="Aparelho não encontrado")
+    gen = await _generate_provisioning_file(tid, dev)
+    now = datetime.now(timezone.utc).isoformat()
+    await db.provisioning_devices.update_one(
+        {"id": dev_id, "tenant_id": tid},
+        {"$set": {"filename": gen["filename"], "url": gen["url"],
+                   "content_type": gen["content_type"],
+                   "last_provisioned_at": now, "updated_at": now}})
+    return {"ok": True, **gen, "last_provisioned_at": now}
+
+
+@api.delete("/provisioning/devices/{dev_id}")
+async def provisioning_delete(dev_id: str,
+                                 user: dict = Depends(require_super_admin())):
+    tid = await require_tenant_or_super(user)
+    dev = await db.provisioning_devices.find_one(
+        {"id": dev_id, "tenant_id": tid}, {"_id": 0})
+    if not dev:
+        raise HTTPException(status_code=404, detail="Aparelho não encontrado")
+    fname = dev.get("filename")
+    if fname:
+        fp = PROVISIONING_DIR / tid / fname
+        try: fp.unlink(missing_ok=True)
+        except Exception: pass
+    await db.provisioning_devices.delete_one({"id": dev_id, "tenant_id": tid})
+    await write_audit(user, "delete", "provisioning_device", dev_id,
+                       f"{dev.get('mac')} · ramal {dev.get('extension')}", {})
+    return {"ok": True}
+
+
+@api.get("/provisioning/devices/{dev_id}/download")
+async def provisioning_download(dev_id: str,
+                                   user: dict = Depends(require_super_admin())):
+    """Download autenticado do XML/CFG (apenas super_admin)."""
+    tid = await require_tenant_or_super(user)
+    dev = await db.provisioning_devices.find_one(
+        {"id": dev_id, "tenant_id": tid}, {"_id": 0})
+    if not dev or not dev.get("filename"):
+        raise HTTPException(status_code=404, detail="Aparelho não encontrado")
+    fp = PROVISIONING_DIR / tid / dev["filename"]
+    if not fp.exists():
+        # regenera se sumiu
+        await _generate_provisioning_file(tid, dev)
+    content = fp.read_text(encoding="utf-8")
+
+    def gen():
+        yield content.encode("utf-8")
+    return StreamingResponse(
+        gen(), media_type=dev.get("content_type") or "text/plain",
+        headers={"Content-Disposition": f'attachment; filename="{dev["filename"]}"'})
+
+
+# Rota PÚBLICA (sem auth) — telefones consomem aqui.
+# Usa prefixo /api para ser roteada automaticamente pelo ingress sem
+# precisar de configuração extra de proxy reverso.
+@api.get("/provisioning-files/{tenant_id}/{filename}")
+async def provisioning_public(tenant_id: str, filename: str, request: Request):
+    """Serve o arquivo .cfg/.xml para o telefone. Valida o filename contra a
+    coleção provisioning_devices (proteção básica)."""
+    safe = filename.replace("..", "").replace("/", "").replace("\\", "")
+    if safe != filename:
+        raise HTTPException(status_code=400, detail="filename inválido")
+    dev = await db.provisioning_devices.find_one(
+        {"tenant_id": tenant_id, "filename": filename}, {"_id": 0})
+    if not dev:
+        raise HTTPException(status_code=404, detail="not found")
+    fp = PROVISIONING_DIR / tenant_id / filename
+    if not fp.exists():
+        await _generate_provisioning_file(tenant_id, dev)
+        if not fp.exists():
+            raise HTTPException(status_code=404, detail="file missing")
+    try:
+        await db.provisioning_devices.update_one(
+            {"id": dev["id"]},
+            {"$set": {"last_fetched_at": datetime.now(timezone.utc).isoformat(),
+                       "last_fetched_ip": request.client.host if request.client else None,
+                       "last_fetched_ua": request.headers.get("user-agent", "")[:200]}})
+    except Exception:
+        pass
+    content = fp.read_text(encoding="utf-8")
+    return Response(content=content,
+                     media_type=dev.get("content_type") or "text/plain")
 
 
 # ---------- Users ----------
