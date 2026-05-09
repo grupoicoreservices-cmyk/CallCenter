@@ -1,0 +1,44 @@
+# =====================================================================
+# SIPDefault.cnf - Cisco 6921/6941 SIP - Voxyra/Grupo Icore
+# =====================================================================
+# Coloque em /var/lib/tftpboot/SIPDefault.cnf
+# Permissao: chmod 644 + chown tftpd:tftpd
+# =====================================================================
+
+image_version: "SIP"
+proxy1_address: "grupoicore.cliente.voxyra.net.br"
+proxy1_port: 5060
+proxy_register: 1
+nat_enable: 0
+nat_address: ""
+voip_control_port: 5060
+start_media_port: 16384
+end_media_port: 32766
+preferred_codec: "g711alaw"
+tos_media: 5
+dial_template: "dialplan"
+dyn_dns_addr_1: ""
+dyn_dns_name_1: ""
+dyn_tftp_addr: ""
+sntp_server: "pool.ntp.org"
+sntp_mode: "unicast"
+time_zone: "GMT-3:00"
+dst_offset: 0
+dst_auto_adjust: 0
+time_format_24hr: 1
+date_format: "D/M/Y"
+phone_label: ""
+phone_prompt: "Voxyra"
+user_info: "None"
+remote_party_id: 1
+semi_attended_transfer: 1
+call_hold_ringback: 1
+stutter_msg_waiting: 1
+messages_uri: "*97"
+forward_url: "x-cisco-serviceuri-cfwdall"
+pickup_url: "x-cisco-serviceuri-pickup"
+gpickup_url: "x-cisco-serviceuri-gpickup"
+opickup_url: "x-cisco-serviceuri-opickup"
+meetme_url: "x-cisco-serviceuri-meetme"
+abbrdial_url: "x-cisco-serviceuri-abbrdial"
+auto_answer_enable: 0

@@ -1,0 +1,31 @@
+<!--
+  PATCH para /etc/freeswitch/sip_profiles/internal.xml
+  =====================================================
+  Tenant       : Grupo Icore
+  Dominio      : grupoicore.cliente.voxyra.net.br
+  IP publico   : 51.222.195.17
+
+  Como aplicar:
+    1. sudo nano /etc/freeswitch/sip_profiles/internal.xml
+    2. Localize o bloco <profile name="internal"> ... <settings> ...
+    3. Adicione (ou descomente) os 6 <param> abaixo dentro de <settings>
+    4. Salve
+    5. fs_cli -x "sofia profile internal restart reloadxml"
+    6. fs_cli -x "sofia status profile internal"   (deve voltar como RUNNING)
+
+  Por que:
+    - challenge-realm "auto_to" : faz o realm do 401 casar com o "To:"
+      do telefone (atualmente IP), permitindo que o Cisco 9.4.1 finalmente
+      responda com Authorization (parando o loop de 401).
+    - force-register-domain : grava o registro no banco SEMPRE como pertencente
+      ao dominio do tenant, mesmo que o telefone use IP no From/To.
+    - aliases : permite que o profile internal aceite tanto IP quanto FQDN.
+    - multiple-registrations : evita derrubar registro antigo no reboot.
+-->
+
+<param name="challenge-realm" value="auto_to"/>
+<param name="force-register-domain" value="grupoicore.cliente.voxyra.net.br"/>
+<param name="force-register-db-domain" value="grupoicore.cliente.voxyra.net.br"/>
+<param name="aliases" value="51.222.195.17 callvoxysipbr01.voxyra.net.br grupoicore.cliente.voxyra.net.br"/>
+<param name="multiple-registrations" value="contact"/>
+<param name="accept-blind-reg" value="false"/>

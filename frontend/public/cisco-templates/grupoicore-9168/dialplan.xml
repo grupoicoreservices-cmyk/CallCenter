@@ -1,0 +1,23 @@
+<!--
+  dialplan.xml - Plano de discagem - Grupo Icore
+  ===============================================
+  Coloque em /var/lib/tftpboot/dialplan.xml
+  Permissao: chmod 644 + chown tftpd:tftpd
+
+  Padrões:
+    9...                -> ramais 4 digitos comecando com 9
+    *97                 -> voicemail
+    *8                  -> pickup
+    0[2-9]......        -> local 8 digitos com prefixo 0
+    0[2-9]........      -> celular DDD com prefixo 0
+    00..                -> internacional
+-->
+<DIALTEMPLATE>
+  <TEMPLATE MATCH="*"               Timeout="3"/>
+  <TEMPLATE MATCH="9..."            Timeout="0"/>
+  <TEMPLATE MATCH="*97"             Timeout="0"/>
+  <TEMPLATE MATCH="*8"              Timeout="0"/>
+  <TEMPLATE MATCH="0[2-9]......"    Timeout="0"/>
+  <TEMPLATE MATCH="0[2-9]........"  Timeout="0"/>
+  <TEMPLATE MATCH="00.."            Timeout="3"/>
+</DIALTEMPLATE>
