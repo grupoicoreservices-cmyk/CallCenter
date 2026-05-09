@@ -1,0 +1,25 @@
+<!--
+  dialplan.xml - Plano de discagem Cisco 6921/6941 SIP
+  ====================================================
+  Salve na mesma pasta TFTP do FusionPBX com nome literal: dialplan.xml
+  Permissao: 644
+
+  Ajuste os padroes MATCH conforme seu plano de numeracao:
+    9...   -> ramais 4 digitos comecando com 9 (ex.: 9165, 9202)
+    *97    -> voicemail (FusionPBX padrao)
+    *8     -> pickup
+    0...   -> chamadas externas com prefixo 0
+    00..   -> internacional com 00
+
+  Timeout: tempo (segundos) que o telefone espera por mais digitos
+  apos casar o padrao. 0 = disca imediatamente.
+-->
+<DIALTEMPLATE>
+  <TEMPLATE MATCH="*"               Timeout="3"/>
+  <TEMPLATE MATCH="9..."            Timeout="0"/>
+  <TEMPLATE MATCH="*97"             Timeout="0"/>
+  <TEMPLATE MATCH="*8"              Timeout="0"/>
+  <TEMPLATE MATCH="0[2-9]......"    Timeout="0"/>
+  <TEMPLATE MATCH="0[2-9]........"  Timeout="0"/>
+  <TEMPLATE MATCH="00.."            Timeout="3"/>
+</DIALTEMPLATE>
