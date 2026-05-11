@@ -92,6 +92,17 @@ See `/app/memory/test_credentials.md`.
   - Endpoint único: `GET /api/strategic/overview?period=today|7d|30d|90d`
   - Permissão: `reports.view`
   - Item de menu lateral "Estratégica" (ícone TrendingUp) entre Relatórios e Filas
+- 2026-05-11: **P3e Fase 1 — Refactor faseado do `server.py`** — Criada estrutura modular em `/app/backend/routers/`:
+  - **Padrão "factory"**: cada arquivo expõe `build_router(deps: dict) -> APIRouter`. server.py centraliza dependências (db, helpers de auth) em `_ROUTER_DEPS` e inclui cada router via `api.include_router(...)`. Evita imports circulares e mantém o wiring explícito.
+  - **Primeiro domínio extraído**: `/audit-logs` (`routers/audit_logs.py`) — 1 endpoint, isolado, prova de conceito validada via curl.
+  - **Próximos lotes** (em sessões dedicadas para minimizar risco):
+    - Lote A: auth, users, tenants
+    - Lote B: agents, queues, extensions, calls
+    - Lote C: recordings, reports, strategic, scheduled-reports
+    - Lote D: pbx, fusionpbx, provisioning, manager
+    - Lote E: billing, charges, plans, dialer
+  - Documentação completa do padrão em `routers/__init__.py`.
+
 - 2026-05-11: **P1a — Relatórios agendados por email** (Onda 4) — Nova página `/scheduled-reports`:
   - **SMTP por tenant**: configurações armazenadas em `db.smtp_settings` com senha preservada se vier vazia em edição. Botão "Enviar teste" valida credenciais.
   - **Agendamentos CRUD**: `/api/scheduled-reports` (GET/POST/PUT/DELETE) + `POST /api/scheduled-reports/{id}/run-now` para execução manual imediata.

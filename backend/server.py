@@ -2548,18 +2548,9 @@ async def delete_super_admin(user_id: str, user: dict = Depends(require_super_ad
     return {"ok": True}
 
 
-@api.get("/audit-logs")
-async def list_audit_logs(
-    user: dict = Depends(require_permission("users.manage")),
-    target_type: Optional[str] = None, action: Optional[str] = None,
-    actor_id: Optional[str] = None, limit: int = Query(200, le=1000),
-):
-    q = {**tenant_filter(user)}
-    if target_type: q["target_type"] = target_type
-    if action: q["action"] = action
-    if actor_id: q["actor_id"] = actor_id
-    docs = await db.audit_logs.find(q, {"_id": 0}).sort("created_at", -1).to_list(limit)
-    return {"logs": docs}
+# /audit-logs movido para routers/audit_logs.py em 2026-05-11 (P3e fase 1).
+# A inclusão do router modular é feita no final deste arquivo via
+# `api.include_router(audit_logs.build_router(...))`.
 
 # ---------- Helpers / Constants ----------
 DISPOSITION_LABELS = {"answered": "Atendida", "missed": "Perdida", "abandoned": "Abandonada", "voicemail": "Correio de Voz"}
@@ -7205,6 +7196,18 @@ async def on_startup():
 @app.on_event("shutdown")
 async def on_shutdown():
     client.close()
+
+# ===== Modular Routers (P3e refactor — faseado) =====
+# À medida que cada domínio é extraído de server.py, ele é registrado aqui via
+# build_router(deps). Mantém dependências centralizadas e evita imports circulares.
+from routers import audit_logs as _r_audit_logs
+
+_ROUTER_DEPS = {
+    "db": db,
+    "require_permission": require_permission,
+    "tenant_filter": tenant_filter,
+}
+api.include_router(_r_audit_logs.build_router(_ROUTER_DEPS))
 
 app.include_router(api)
 # Serve uploaded assets (logos, wallpapers, favicons) at /uploads/<filename>
