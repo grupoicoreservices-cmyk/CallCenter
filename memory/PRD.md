@@ -92,4 +92,16 @@ See `/app/memory/test_credentials.md`.
   - Endpoint único: `GET /api/strategic/overview?period=today|7d|30d|90d`
   - Permissão: `reports.view`
   - Item de menu lateral "Estratégica" (ícone TrendingUp) entre Relatórios e Filas
+- 2026-05-11: **P1a — Relatórios agendados por email** (Onda 4) — Nova página `/scheduled-reports`:
+  - **SMTP por tenant**: configurações armazenadas em `db.smtp_settings` com senha preservada se vier vazia em edição. Botão "Enviar teste" valida credenciais.
+  - **Agendamentos CRUD**: `/api/scheduled-reports` (GET/POST/PUT/DELETE) + `POST /api/scheduled-reports/{id}/run-now` para execução manual imediata.
+  - **Frequências**: diário · semanal (seletor dia da semana) · mensal (dia 1-28). Próxima execução calculada em UTC.
+  - **Tipos de relatório**: cdr, agents, queues, sla, trend, abandoned, **strategic** (snapshot da Página Estratégica).
+  - **Formatos múltiplos**: PDF e/ou XLSX no mesmo email.
+  - **Strategic snapshot**: novo endpoint `GET /api/strategic/export?format=xlsx|pdf&period=*` gera arquivo com sumário, top números, ranking agentes, SLA por fila em planilha multi-abas (XLSX) ou PDF profissional landscape.
+  - **Scheduler loop**: roda a cada 60s, executa agendamentos com `next_run_at <= now` e `enabled=true`, atualiza `last_run_status` (`ok`/`error`) + `next_run_at`.
+  - **Helpers**: refatoração de `reports_export` em `_build_xlsx_bytes`/`_build_pdf_bytes` + `_generate_report_artifact(tid, type, fmt, period)` reutilizável pelo scheduler.
+  - **Validação Pydantic** robusta: frequência (daily/weekly/monthly), períodos (today/7d/30d/90d), horário HH:MM 24h, emails, formatos (pdf/xlsx).
+  - **Auditoria**: cada CRUD escreve audit_log automaticamente.
+  - **Permissão**: `reports.export`. Item de menu lateral "Agendados" (ícone Mail) entre Estratégica e Filas.
 

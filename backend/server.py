@@ -4466,6 +4466,252 @@ async def reports_export(type: str, format: str = "xlsx", period: str = "7d",
     raise HTTPException(status_code=400, detail="Formato inválido. Use xlsx ou pdf.")
 
 
+# ---------- Report generation helpers (callable by scheduler) ----------
+def _build_xlsx_bytes(data: dict, period: str) -> bytes:
+    import io as _io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    wb = Workbook(); ws = wb.active; ws.title = data["title"][:30]
+    ws.append([data["title"]]); ws["A1"].font = Font(bold=True, size=14)
+    ws.append([f"Gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M')}  ·  Período: {period}"])
+    ws.append([])
+    ws.append([c["label"] for c in data["columns"]])
+    for cell in ws[ws.max_row]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="09090B")
+        cell.alignment = Alignment(horizontal="left")
+    for row in data["rows"]:
+        ws.append([row.get(c["key"], "") for c in data["columns"]])
+    for col in ws.columns:
+        max_len = max((len(str(c.value)) if c.value is not None else 0) for c in col)
+        ws.column_dimensions[col[0].column_letter].width = min(max_len + 2, 40)
+    buf = _io.BytesIO(); wb.save(buf); buf.seek(0)
+    return buf.getvalue()
+
+
+def _build_pdf_bytes(data: dict, period: str) -> bytes:
+    import io as _io
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+    buf = _io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=landscape(A4), leftMargin=20, rightMargin=20, topMargin=25, bottomMargin=20)
+    styles = getSampleStyleSheet(); story = []
+    story.append(Paragraph(f"<b>{data['title']}</b>", styles["Title"]))
+    story.append(Paragraph(f"Gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M')}  ·  Período: {period}", styles["Normal"]))
+    story.append(Spacer(1, 12))
+    headers = [c["label"] for c in data["columns"]]
+    table_data = [headers]
+    for row in data["rows"]:
+        table_data.append([str(row.get(c["key"], "")) for c in data["columns"]])
+    if len(table_data) == 1:
+        table_data.append(["Sem dados para o período selecionado."] + [""] * (len(headers) - 1))
+    tbl = Table(table_data, repeatRows=1)
+    tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#09090B")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#FAFAFA")]),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#E4E4E7")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 5), ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+        ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    story.append(tbl); doc.build(story); buf.seek(0)
+    return buf.getvalue()
+
+
+def _build_strategic_xlsx_bytes(overview: dict, period: str) -> bytes:
+    import io as _io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    wb = Workbook()
+    # ── Aba 1: Sumário ────────────────────────────────────────────
+    ws = wb.active; ws.title = "Sumário"
+    ws.append(["Página Estratégica — Sumário Executivo"])
+    ws["A1"].font = Font(bold=True, size=14)
+    ws.append([f"Gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M')}  ·  Período: {period}"])
+    ws.append([])
+    s = overview.get("summary", {})
+    for label, key in [("Total de chamadas", "total_calls"), ("Atendidas", "answered"),
+                         ("Perdidas", "missed"), ("Entrantes", "inbound"), ("Saídas", "outbound"),
+                         ("Taxa de atendimento (%)", "answer_rate"),
+                         ("TMA (s)", "avg_handle_sec"), ("TME (s)", "avg_wait_sec")]:
+        ws.append([label, s.get(key, 0)])
+    c = overview.get("conversion", {})
+    ws.append([])
+    ws.append(["CONVERSÃO (via Auditoria QA)"])
+    ws[f"A{ws.max_row}"].font = Font(bold=True)
+    ws.append(["Chamadas avaliadas", c.get("evaluated_calls", 0)])
+    ws.append(["Conversões (nota >= 4)", c.get("conversions", 0)])
+    ws.append(["Taxa de conversão (%)", c.get("conversion_rate", 0)])
+    ws.append(["Nota média QA", c.get("avg_qa_score", 0)])
+    # ── Aba 2: Top números ────────────────────────────────────────
+    def _add_top(name: str, rows: list):
+        w = wb.create_sheet(name[:30])
+        w.append(["#", "Número", "Chamadas", "Atendidas", "Perdidas", "Duração total (s)"])
+        for cell in w[1]:
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = PatternFill("solid", fgColor="09090B")
+        for i, r in enumerate(rows, 1):
+            w.append([i, r.get("number"), r.get("calls"), r.get("answered"),
+                       r.get("missed"), r.get("total_duration_sec")])
+    _add_top("Top Entrantes", overview.get("top_inbound", []))
+    _add_top("Top Saídas", overview.get("top_outbound", []))
+    # ── Aba 3: Ranking agentes ────────────────────────────────────
+    w = wb.create_sheet("Ranking Agentes")
+    w.append(["Agente", "Chamadas", "Atendidas", "Perdidas", "% Atend.",
+               "TMA (s)", "TME (s)", "QA Média", "QA Aval.", "% Conv."])
+    for cell in w[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="09090B")
+    for r in overview.get("agent_ranking", []):
+        w.append([r.get("agent_name"), r.get("calls"), r.get("answered"), r.get("missed"),
+                   r.get("answer_rate"), r.get("avg_handle_sec"), r.get("avg_wait_sec"),
+                   r.get("qa_avg") or "-", r.get("qa_count"), r.get("conversion_rate")])
+    # ── Aba 4: SLA por fila ───────────────────────────────────────
+    w = wb.create_sheet("SLA por Fila")
+    w.append(["Fila", "Chamadas", "Atendidas", "Abandonadas", "% Abandono",
+               "TME (s)", "Tempo Abandono (s)", "SLA 20s (%)"])
+    for cell in w[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="09090B")
+    for r in overview.get("queue_sla", []):
+        w.append([r.get("queue_name"), r.get("calls"), r.get("answered"), r.get("abandoned"),
+                   r.get("abandon_rate"), r.get("avg_wait_sec"), r.get("avg_abandon_sec"),
+                   r.get("sla_20s_rate")])
+    # Auto-width
+    for sheet in wb.worksheets:
+        for col in sheet.columns:
+            max_len = max((len(str(c.value)) if c.value is not None else 0) for c in col)
+            sheet.column_dimensions[col[0].column_letter].width = min(max_len + 2, 40)
+    buf = _io.BytesIO(); wb.save(buf); buf.seek(0)
+    return buf.getvalue()
+
+
+def _build_strategic_pdf_bytes(overview: dict, period: str) -> bytes:
+    import io as _io
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
+    buf = _io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=landscape(A4), leftMargin=20, rightMargin=20, topMargin=25, bottomMargin=20)
+    styles = getSampleStyleSheet(); story = []
+
+    story.append(Paragraph("<b>Página Estratégica — Snapshot Executivo</b>", styles["Title"]))
+    story.append(Paragraph(f"Gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M')}  ·  Período: {period}",
+                            styles["Normal"]))
+    story.append(Spacer(1, 14))
+
+    # Sumário KPI
+    s = overview.get("summary", {}); c = overview.get("conversion", {})
+    kpi_data = [
+        ["Métrica", "Valor"],
+        ["Total de chamadas", str(s.get("total_calls", 0))],
+        ["Atendidas", f"{s.get('answered', 0)}  ({s.get('answer_rate', 0)}%)"],
+        ["Perdidas", str(s.get("missed", 0))],
+        ["Entrantes / Saídas", f"{s.get('inbound', 0)} / {s.get('outbound', 0)}"],
+        ["TMA (tempo médio atend.)", f"{s.get('avg_handle_sec', 0)}s"],
+        ["TME (tempo médio espera)", f"{s.get('avg_wait_sec', 0)}s"],
+        ["Conversão (via Auditoria QA)",
+         f"{c.get('conversions', 0)}/{c.get('evaluated_calls', 0)} ({c.get('conversion_rate', 0)}%)"],
+        ["Nota média QA", str(c.get("avg_qa_score", 0))],
+    ]
+    table_style = TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#09090B")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#FAFAFA")]),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#E4E4E7")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+    ])
+    t = Table(kpi_data, colWidths=[200, 200]); t.setStyle(table_style); story.append(t)
+    story.append(Spacer(1, 14))
+
+    # Ranking agentes
+    if overview.get("agent_ranking"):
+        story.append(Paragraph("<b>Ranking de Agentes</b>", styles["Heading2"]))
+        rk_rows = [["Agente", "Chamadas", "Atend.", "% Atend.", "TMA (s)", "TME (s)",
+                     "QA Méd.", "% Conv."]]
+        for r in overview["agent_ranking"][:20]:
+            rk_rows.append([r.get("agent_name", "—"), r.get("calls", 0), r.get("answered", 0),
+                             f"{r.get('answer_rate', 0)}%", r.get("avg_handle_sec", 0),
+                             r.get("avg_wait_sec", 0),
+                             str(r.get("qa_avg")) if r.get("qa_avg") is not None else "-",
+                             f"{r.get('conversion_rate', 0)}%"])
+        rt = Table(rk_rows, repeatRows=1); rt.setStyle(table_style); story.append(rt)
+        story.append(Spacer(1, 14))
+
+    # Top números (lado a lado)
+    if overview.get("top_inbound") or overview.get("top_outbound"):
+        story.append(Paragraph("<b>Top 10 Números</b>", styles["Heading2"]))
+        max_rows = max(len(overview.get("top_inbound", [])), len(overview.get("top_outbound", [])))
+        tn_rows = [["#", "Entrante", "Calls", "#", "Saída", "Calls"]]
+        for i in range(max_rows):
+            inb = overview["top_inbound"][i] if i < len(overview.get("top_inbound", [])) else {}
+            out = overview["top_outbound"][i] if i < len(overview.get("top_outbound", [])) else {}
+            tn_rows.append([i + 1, inb.get("number", "—"), inb.get("calls", "—"),
+                             i + 1, out.get("number", "—"), out.get("calls", "—")])
+        tt = Table(tn_rows, repeatRows=1); tt.setStyle(table_style); story.append(tt)
+        story.append(Spacer(1, 14))
+
+    # SLA por fila
+    if overview.get("queue_sla"):
+        story.append(PageBreak())
+        story.append(Paragraph("<b>SLA por Fila</b>", styles["Heading2"]))
+        ql_rows = [["Fila", "Chamadas", "Atend.", "Aband.", "% Aband.", "TME (s)", "SLA 20s (%)"]]
+        for r in overview["queue_sla"]:
+            ql_rows.append([r.get("queue_name", "—"), r.get("calls", 0), r.get("answered", 0),
+                             r.get("abandoned", 0), f"{r.get('abandon_rate', 0)}%",
+                             r.get("avg_wait_sec", 0), f"{r.get('sla_20s_rate', 0)}%"])
+        qt = Table(ql_rows, repeatRows=1); qt.setStyle(table_style); story.append(qt)
+
+    doc.build(story); buf.seek(0)
+    return buf.getvalue()
+
+
+async def _generate_report_artifact(tid: str, report_type: str, fmt: str,
+                                       period: str = "7d") -> tuple[str, bytes, str]:
+    """Generates a report file as bytes for a tenant (callable by scheduler).
+    Returns (filename, bytes, content_type)."""
+    synthetic_user = {"role": "admin", "tenant_id": tid,
+                       "permissions": ["reports.view", "reports.export"]}
+    ts = datetime.now().strftime("%Y%m%d_%H%M")
+    if report_type == "strategic":
+        # Build overview via the existing handler
+        f = tenant_filter(synthetic_user)
+        cutoff = _period_to_cutoff(period).isoformat()
+        base_match = {**f, "started_at": {"$gte": cutoff}}
+        # Reuse the strategic_overview computation by calling a stripped-down internal version.
+        # Simplest path: directly call strategic_overview as if it were a function with the user.
+        overview = await _compute_strategic_overview(synthetic_user, period)
+        if fmt == "xlsx":
+            return (f"estrategica_{period}_{ts}.xlsx",
+                    _build_strategic_xlsx_bytes(overview, period),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        if fmt == "pdf":
+            return (f"estrategica_{period}_{ts}.pdf",
+                    _build_strategic_pdf_bytes(overview, period),
+                    "application/pdf")
+        raise ValueError(f"Formato inválido: {fmt}")
+    # Standard report types via _build_report
+    data = await _build_report(synthetic_user, report_type, period, None, None)
+    if fmt == "xlsx":
+        return (f"{report_type}_{period}_{ts}.xlsx",
+                _build_xlsx_bytes(data, period),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    if fmt == "pdf":
+        return (f"{report_type}_{period}_{ts}.pdf",
+                _build_pdf_bytes(data, period),
+                "application/pdf")
+    raise ValueError(f"Formato inválido: {fmt}")
+
+
 # ---------- Estratégica (Executive Analytics) ----------
 def _period_to_cutoff(period: str) -> datetime:
     now = datetime.now(timezone.utc)
@@ -4480,11 +4726,8 @@ def _period_to_cutoff(period: str) -> datetime:
     return now - timedelta(days=7)
 
 
-@api.get("/strategic/overview")
-async def strategic_overview(period: str = "7d",
-                              user: dict = Depends(require_permission("reports.view"))):
-    """Visão executiva consolidada: top números, ranking agentes, heatmap,
-    SLA por fila, abandono e conversão (via QA)."""
+async def _compute_strategic_overview(user: dict, period: str) -> dict:
+    """Computes the full strategic overview (callable by scheduler too)."""
     f = tenant_filter(user)
     cutoff = _period_to_cutoff(period).isoformat()
     base_match = {**f, "started_at": {"$gte": cutoff}}
@@ -4667,6 +4910,388 @@ async def strategic_overview(period: str = "7d",
         "queue_sla": queue_rows,
         "conversion": conversion,
     }
+
+
+@api.get("/strategic/overview")
+async def strategic_overview(period: str = "7d",
+                              user: dict = Depends(require_permission("reports.view"))):
+    return await _compute_strategic_overview(user, period)
+
+
+@api.get("/strategic/export")
+async def strategic_export(format: str = "xlsx", period: str = "7d",
+                            user: dict = Depends(require_permission("reports.export"))):
+    """Export do snapshot estratégico em PDF ou XLSX."""
+    if format not in ("xlsx", "pdf"):
+        raise HTTPException(status_code=400, detail="Formato inválido. Use xlsx ou pdf.")
+    overview = await _compute_strategic_overview(user, period)
+    if format == "xlsx":
+        content = _build_strategic_xlsx_bytes(overview, period)
+        ct = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    else:
+        content = _build_strategic_pdf_bytes(overview, period)
+        ct = "application/pdf"
+    ts = datetime.now().strftime("%Y%m%d_%H%M")
+    return Response(content=content, media_type=ct,
+                     headers={"Content-Disposition":
+                              f'attachment; filename="estrategica_{period}_{ts}.{format}"'})
+
+
+# ---------- Scheduled Email Reports ----------
+class SmtpSettings(BaseModel):
+    host: str
+    port: int = 587
+    username: Optional[str] = ""
+    password: Optional[str] = ""
+    from_email: str
+    from_name: Optional[str] = "Voxyra CCA"
+    use_tls: bool = True
+    use_ssl: bool = False
+
+
+class SmtpTestReq(BaseModel):
+    to_email: str
+
+
+class ScheduledReportCreate(BaseModel):
+    name: str
+    report_type: str  # cdr|agents|queues|sla|strategic|...
+    report_period: str = "7d"  # today|7d|30d|90d
+    frequency: str  # daily|weekly|monthly
+    schedule_time: str = "08:00"   # HH:MM (24h)
+    schedule_day: Optional[int] = None  # weekday 0=Mon..6=Sun OR day-of-month 1..28
+    recipients: List[str]
+    formats: List[str] = ["pdf"]  # pdf|xlsx
+    enabled: bool = True
+
+    @validator("frequency")
+    def _freq(cls, v):
+        if v not in ("daily", "weekly", "monthly"):
+            raise ValueError("frequency deve ser daily|weekly|monthly")
+        return v
+
+    @validator("report_period")
+    def _per(cls, v):
+        if v not in ("today", "7d", "30d", "90d"):
+            raise ValueError("report_period deve ser today|7d|30d|90d")
+        return v
+
+    @validator("schedule_time")
+    def _time(cls, v):
+        if not re.match(r"^([01]?\d|2[0-3]):[0-5]\d$", v):
+            raise ValueError("schedule_time deve ser HH:MM (24h)")
+        return v
+
+    @validator("recipients")
+    def _rec(cls, v):
+        if not v: raise ValueError("Informe pelo menos um destinatário")
+        for e in v:
+            if "@" not in e or "." not in e:
+                raise ValueError(f"Email inválido: {e}")
+        return v
+
+    @validator("formats")
+    def _fmt(cls, v):
+        if not v: raise ValueError("Selecione ao menos um formato")
+        for f in v:
+            if f not in ("pdf", "xlsx"):
+                raise ValueError(f"Formato inválido: {f}")
+        return v
+
+
+def _compute_next_run(now: datetime, frequency: str, schedule_time: str,
+                       schedule_day: Optional[int]) -> datetime:
+    hh, mm = [int(x) for x in schedule_time.split(":")]
+    target = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+    if frequency == "daily":
+        if target <= now:
+            target += timedelta(days=1)
+        return target
+    if frequency == "weekly":
+        wanted = schedule_day if schedule_day is not None else 0
+        wanted = max(0, min(wanted, 6))
+        days_ahead = (wanted - now.weekday()) % 7
+        target += timedelta(days=days_ahead)
+        if target <= now:
+            target += timedelta(days=7)
+        return target
+    if frequency == "monthly":
+        day = schedule_day if schedule_day is not None else 1
+        day = max(1, min(day, 28))
+        try:
+            target = target.replace(day=day)
+        except ValueError:
+            pass
+        if target <= now:
+            if target.month == 12:
+                target = target.replace(year=target.year + 1, month=1)
+            else:
+                target = target.replace(month=target.month + 1)
+        return target
+    return now + timedelta(days=1)
+
+
+async def _send_email_with_attachments(smtp: dict, to_emails: List[str],
+                                          subject: str, html_body: str,
+                                          attachments: List[tuple]) -> None:
+    import smtplib, ssl as _ssl
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+    from email.mime.application import MIMEApplication
+    from email.utils import formataddr
+
+    msg = MIMEMultipart()
+    from_name = smtp.get("from_name") or "Voxyra CCA"
+    msg["From"] = formataddr((from_name, smtp["from_email"]))
+    msg["To"] = ", ".join(to_emails)
+    msg["Subject"] = subject
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
+    for fname, data, ct in attachments:
+        maintype, _, subtype = (ct or "application/octet-stream").partition("/")
+        part = MIMEApplication(data, _subtype=subtype or "octet-stream")
+        part.add_header("Content-Disposition", "attachment", filename=fname)
+        msg.attach(part)
+
+    host = smtp["host"]; port = int(smtp.get("port") or 587)
+    user = smtp.get("username") or ""
+    pwd = smtp.get("password") or ""
+    use_tls = bool(smtp.get("use_tls", True))
+    use_ssl = bool(smtp.get("use_ssl", False))
+
+    def _send_sync():
+        if use_ssl:
+            ctx = _ssl.create_default_context()
+            with smtplib.SMTP_SSL(host, port, context=ctx, timeout=30) as srv:
+                if user: srv.login(user, pwd)
+                srv.sendmail(smtp["from_email"], to_emails, msg.as_string())
+        else:
+            with smtplib.SMTP(host, port, timeout=30) as srv:
+                srv.ehlo()
+                if use_tls:
+                    ctx = _ssl.create_default_context()
+                    srv.starttls(context=ctx); srv.ehlo()
+                if user: srv.login(user, pwd)
+                srv.sendmail(smtp["from_email"], to_emails, msg.as_string())
+
+    await asyncio.get_event_loop().run_in_executor(None, _send_sync)
+
+
+REPORT_TYPE_LABELS = {
+    "cdr": "Detalhamento de chamadas (CDR)",
+    "agents": "Performance de agentes",
+    "queues": "Performance de filas",
+    "sla": "SLA / Tempo de resposta",
+    "trend": "Tendência de chamadas",
+    "abandoned": "Chamadas abandonadas",
+    "strategic": "Página Estratégica (snapshot)",
+}
+
+
+@api.get("/smtp/settings")
+async def smtp_get(user: dict = Depends(require_permission("reports.export"))):
+    tid = await require_tenant_or_super(user)
+    s = await db.smtp_settings.find_one({"tenant_id": tid}, {"_id": 0}) or {}
+    has_pwd = bool(s.get("password"))
+    if "password" in s: s.pop("password")
+    s["has_password"] = has_pwd
+    return s
+
+
+@api.put("/smtp/settings")
+async def smtp_put(body: SmtpSettings,
+                    user: dict = Depends(require_permission("reports.export"))):
+    tid = await require_tenant_or_super(user)
+    existing = await db.smtp_settings.find_one({"tenant_id": tid})
+    doc = body.dict()
+    if not doc.get("password") and existing and existing.get("password"):
+        doc["password"] = existing["password"]
+    doc["tenant_id"] = tid
+    doc["updated_at"] = datetime.now(timezone.utc).isoformat()
+    await db.smtp_settings.update_one({"tenant_id": tid}, {"$set": doc}, upsert=True)
+    await write_audit(user, "update", "smtp_settings", tid,
+                       f"{doc.get('host')}:{doc.get('port')}", {})
+    return {"ok": True}
+
+
+@api.post("/smtp/test")
+async def smtp_test(body: SmtpTestReq,
+                     user: dict = Depends(require_permission("reports.export"))):
+    tid = await require_tenant_or_super(user)
+    smtp = await db.smtp_settings.find_one({"tenant_id": tid})
+    if not smtp:
+        raise HTTPException(status_code=400,
+            detail="SMTP não configurado. Salve as credenciais primeiro.")
+    try:
+        await _send_email_with_attachments(
+            smtp, [body.to_email],
+            "Voxyra CCA · Teste SMTP",
+            ("<h2>SMTP funcionando!</h2>"
+             "<p>Esse é um email de teste enviado pelo Voxyra CCA.</p>"
+             f"<p><small>Tenant: <code>{tid}</code> · "
+             f"Enviado em {datetime.now().strftime('%d/%m/%Y %H:%M')}</small></p>"),
+            [])
+        return {"ok": True, "message": f"Email enviado para {body.to_email}"}
+    except Exception as e:
+        logger.exception("SMTP test failed")
+        raise HTTPException(status_code=500, detail=f"Falha no envio: {e}")
+
+
+@api.get("/scheduled-reports")
+async def sched_list(user: dict = Depends(require_permission("reports.export"))):
+    tid = await require_tenant_or_super(user)
+    docs = await db.scheduled_reports.find({"tenant_id": tid},
+                                              {"_id": 0}).sort("created_at", -1).to_list(500)
+    return {"reports": docs,
+             "report_types": [{"key": k, "label": v} for k, v in REPORT_TYPE_LABELS.items()]}
+
+
+@api.post("/scheduled-reports")
+async def sched_create(body: ScheduledReportCreate,
+                          user: dict = Depends(require_permission("reports.export"))):
+    tid = await require_tenant_or_super(user)
+    if body.report_type not in REPORT_TYPE_LABELS:
+        raise HTTPException(status_code=400,
+            detail=f"report_type inválido. Use: {', '.join(REPORT_TYPE_LABELS.keys())}")
+    now = datetime.now(timezone.utc)
+    doc = {
+        "id": str(uuid.uuid4()),
+        "tenant_id": tid,
+        **body.dict(),
+        "created_at": now.isoformat(),
+        "updated_at": now.isoformat(),
+        "created_by": user.get("email"),
+        "last_run_at": None,
+        "last_run_status": None,
+        "last_run_error": None,
+        "next_run_at": _compute_next_run(now, body.frequency, body.schedule_time,
+                                            body.schedule_day).isoformat(),
+    }
+    await db.scheduled_reports.insert_one(doc)
+    doc.pop("_id", None)
+    await write_audit(user, "create", "scheduled_report", doc["id"],
+                       f"{body.name} ({body.frequency})", {"type": body.report_type})
+    return {"ok": True, "report": doc}
+
+
+@api.put("/scheduled-reports/{rid}")
+async def sched_update(rid: str, body: ScheduledReportCreate,
+                          user: dict = Depends(require_permission("reports.export"))):
+    tid = await require_tenant_or_super(user)
+    existing = await db.scheduled_reports.find_one({"id": rid, "tenant_id": tid})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Agendamento não encontrado")
+    now = datetime.now(timezone.utc)
+    updates = {**body.dict(), "updated_at": now.isoformat(),
+               "next_run_at": _compute_next_run(now, body.frequency, body.schedule_time,
+                                                  body.schedule_day).isoformat()}
+    await db.scheduled_reports.update_one({"id": rid, "tenant_id": tid}, {"$set": updates})
+    await write_audit(user, "update", "scheduled_report", rid, body.name, {})
+    return {"ok": True}
+
+
+@api.delete("/scheduled-reports/{rid}")
+async def sched_delete(rid: str,
+                          user: dict = Depends(require_permission("reports.export"))):
+    tid = await require_tenant_or_super(user)
+    existing = await db.scheduled_reports.find_one({"id": rid, "tenant_id": tid})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Agendamento não encontrado")
+    await db.scheduled_reports.delete_one({"id": rid, "tenant_id": tid})
+    await write_audit(user, "delete", "scheduled_report", rid, existing.get("name", ""), {})
+    return {"ok": True}
+
+
+async def _execute_scheduled_report(rep: dict) -> dict:
+    tid = rep["tenant_id"]
+    smtp = await db.smtp_settings.find_one({"tenant_id": tid})
+    if not smtp:
+        return {"ok": False, "error": "SMTP não configurado para o tenant"}
+    attachments = []
+    for fmt in rep.get("formats") or ["pdf"]:
+        try:
+            fname, data, ct = await _generate_report_artifact(
+                tid, rep["report_type"], fmt, rep.get("report_period") or "7d")
+            attachments.append((fname, data, ct))
+        except Exception as e:
+            logger.exception("Falha ao gerar %s.%s para %s", rep["report_type"], fmt, tid)
+            return {"ok": False, "error": f"Falha ao gerar {fmt.upper()}: {e}"}
+    title = REPORT_TYPE_LABELS.get(rep["report_type"], rep["report_type"])
+    period_label = {"today": "hoje", "7d": "últimos 7 dias",
+                     "30d": "últimos 30 dias", "90d": "últimos 90 dias"
+                    }.get(rep.get("report_period") or "7d", rep.get("report_period"))
+    html = f"""
+    <div style="font-family:-apple-system,Helvetica,Arial,sans-serif;color:#18181b;">
+      <h2 style="margin:0 0 8px 0;">{rep['name']}</h2>
+      <p style="color:#52525b;margin:0 0 16px 0;font-size:13px;">
+        <strong>{title}</strong><br/>
+        Período: {period_label}<br/>
+        Gerado em {datetime.now().strftime('%d/%m/%Y %H:%M')}
+      </p>
+      <p>Olá! Segue em anexo o relatório agendado <strong>{rep['name']}</strong>.</p>
+      <p style="font-size:11px;color:#71717a;margin-top:32px;border-top:1px solid #e4e4e7;padding-top:12px;">
+        Voxyra CCA · Callcenter Analytical · esta mensagem foi enviada automaticamente.
+      </p>
+    </div>
+    """
+    try:
+        await _send_email_with_attachments(
+            smtp, rep["recipients"],
+            f"[Voxyra] {rep['name']} · {period_label}",
+            html, attachments)
+        return {"ok": True}
+    except Exception as e:
+        logger.exception("Falha SMTP no agendamento %s", rep.get("id"))
+        return {"ok": False, "error": f"SMTP: {e}"}
+
+
+@api.post("/scheduled-reports/{rid}/run-now")
+async def sched_run_now(rid: str,
+                          user: dict = Depends(require_permission("reports.export"))):
+    tid = await require_tenant_or_super(user)
+    rep = await db.scheduled_reports.find_one({"id": rid, "tenant_id": tid})
+    if not rep:
+        raise HTTPException(status_code=404, detail="Agendamento não encontrado")
+    result = await _execute_scheduled_report(rep)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    await db.scheduled_reports.update_one(
+        {"id": rid, "tenant_id": tid},
+        {"$set": {"last_run_at": now_iso,
+                    "last_run_status": "ok" if result["ok"] else "error",
+                    "last_run_error": result.get("error")}})
+    if not result["ok"]:
+        raise HTTPException(status_code=500, detail=result.get("error", "Falha desconhecida"))
+    return {"ok": True}
+
+
+async def _scheduled_reports_loop():
+    while True:
+        try:
+            now = datetime.now(timezone.utc)
+            cur = db.scheduled_reports.find({
+                "enabled": True,
+                "next_run_at": {"$lte": now.isoformat()}
+            })
+            async for rep in cur:
+                try:
+                    result = await _execute_scheduled_report(rep)
+                    await db.scheduled_reports.update_one(
+                        {"id": rep["id"]},
+                        {"$set": {
+                            "last_run_at": now.isoformat(),
+                            "last_run_status": "ok" if result["ok"] else "error",
+                            "last_run_error": result.get("error"),
+                            "next_run_at": _compute_next_run(
+                                now, rep["frequency"], rep["schedule_time"],
+                                rep.get("schedule_day")).isoformat(),
+                        }})
+                    logger.info("scheduled_report %s · %s · %s",
+                                 rep.get("id"), rep.get("name"),
+                                 "OK" if result["ok"] else f"ERR: {result.get('error')}")
+                except Exception as e:
+                    logger.exception("scheduled_report executor crashed: %s", e)
+        except Exception as e:
+            logger.exception("scheduled_reports_loop crashed: %s", e)
+        await asyncio.sleep(60)
 
 
 # ---------- Billing: Charges (Asaas + PayPal) ----------
@@ -6570,6 +7195,11 @@ async def on_startup():
     # Start FusionPBX auto-sync scheduler (checks every 30s, syncs per-tenant based on interval)
     asyncio.create_task(_fusionpbx_scheduler())
     logger.info("FusionPBX auto-sync scheduler iniciado")
+    # Start Scheduled Reports loop (checks every 60s for due reports)
+    await db.scheduled_reports.create_index([("tenant_id", 1), ("next_run_at", 1)])
+    await db.smtp_settings.create_index("tenant_id", unique=True)
+    asyncio.create_task(_scheduled_reports_loop())
+    logger.info("Scheduled reports loop iniciado")
     await seed_data()
 
 @app.on_event("shutdown")

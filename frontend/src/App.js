@@ -24,6 +24,7 @@ import Auditoria from "./pages/Auditoria";
 import Provisioning from "./pages/Provisioning";
 import Manager from "./pages/Manager";
 import Strategic from "./pages/Strategic";
+import ScheduledReports from "./pages/ScheduledReports";
 import AuditLogs from "./pages/AuditLogs";
 import Tenants from "./pages/Tenants";
 import Plans from "./pages/Plans";
@@ -54,6 +55,7 @@ function App() {
             <Route path="/recordings" element={<ProtectedRoute><Recordings /></ProtectedRoute>} />
             <Route path="/reports" element={<ProtectedRoute hint="master"><Reports /></ProtectedRoute>} />
             <Route path="/strategic" element={<ProtectedRoute hint="master"><Strategic /></ProtectedRoute>} />
+            <Route path="/scheduled-reports" element={<ProtectedRoute hint="master"><ScheduledReports /></ProtectedRoute>} />
             <Route path="/queues" element={<ProtectedRoute hint="master"><Queues /></ProtectedRoute>} />
             <Route path="/agents" element={<ProtectedRoute hint="master"><Agents /></ProtectedRoute>} />
             <Route path="/extensions" element={<ProtectedRoute hint="master"><Extensions /></ProtectedRoute>} />
