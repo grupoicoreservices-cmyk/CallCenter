@@ -23,6 +23,7 @@ import RoleTemplates from "./pages/RoleTemplates";
 import Auditoria from "./pages/Auditoria";
 import Provisioning from "./pages/Provisioning";
 import Manager from "./pages/Manager";
+import Strategic from "./pages/Strategic";
 import AuditLogs from "./pages/AuditLogs";
 import Tenants from "./pages/Tenants";
 import Plans from "./pages/Plans";
@@ -52,6 +53,7 @@ function App() {
             <Route path="/realtime" element={<ProtectedRoute><Realtime /></ProtectedRoute>} />
             <Route path="/recordings" element={<ProtectedRoute><Recordings /></ProtectedRoute>} />
             <Route path="/reports" element={<ProtectedRoute hint="master"><Reports /></ProtectedRoute>} />
+            <Route path="/strategic" element={<ProtectedRoute hint="master"><Strategic /></ProtectedRoute>} />
             <Route path="/queues" element={<ProtectedRoute hint="master"><Queues /></ProtectedRoute>} />
             <Route path="/agents" element={<ProtectedRoute hint="master"><Agents /></ProtectedRoute>} />
             <Route path="/extensions" element={<ProtectedRoute hint="master"><Extensions /></ProtectedRoute>} />

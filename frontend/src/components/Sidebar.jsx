@@ -2,7 +2,7 @@ import { NavLink, useNavigate } from "react-router-dom";
 import { useEffect, useState } from "react";
 import {
   LayoutDashboard, PhoneCall, Disc3, BarChart3, Users, UserCog, LogOut, Headphones,
-  Tv2, ShieldCheck, History, Building2, X, Sparkles, CreditCard, Receipt, Server, Download, Palette, Crown, Star, Smartphone, Settings,
+  Tv2, ShieldCheck, History, Building2, X, Sparkles, CreditCard, Receipt, Server, Download, Palette, Crown, Star, Smartphone, Settings, TrendingUp,
 } from "lucide-react";
 import { api } from "../lib/api";
 import { useAuth } from "../contexts/AuthContext";
@@ -15,6 +15,7 @@ const ITEMS = [
   { to: "/auditoria", label: "Auditoria QA", icon: Star, testid: "nav-auditoria", perm: "audit.review" },
   { to: "/manager", label: "Manager PBX", icon: Settings, testid: "nav-manager", perm: "pbx.manage" },
   { to: "/reports", label: "Relatórios", icon: BarChart3, testid: "nav-reports", perm: "reports.view" },
+  { to: "/strategic", label: "Estratégica", icon: TrendingUp, testid: "nav-strategic", perm: "reports.view" },
   { to: "/queues", label: "Filas", icon: Users, testid: "nav-queues", perm: "queues.view" },
   { to: "/agents", label: "Agentes", icon: UserCog, testid: "nav-agents", perm: "agents.view" },
   { to: "/tv", label: "Painel TV", icon: Tv2, testid: "nav-tv", perm: "tv.view" },

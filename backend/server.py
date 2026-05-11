@@ -4465,6 +4465,210 @@ async def reports_export(type: str, format: str = "xlsx", period: str = "7d",
                                  headers={"Content-Disposition": f'attachment; filename="{filename_base}.pdf"'})
     raise HTTPException(status_code=400, detail="Formato inválido. Use xlsx ou pdf.")
 
+
+# ---------- Estratégica (Executive Analytics) ----------
+def _period_to_cutoff(period: str) -> datetime:
+    now = datetime.now(timezone.utc)
+    if period == "today":
+        return now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if period == "7d":
+        return now - timedelta(days=7)
+    if period == "30d":
+        return now - timedelta(days=30)
+    if period == "90d":
+        return now - timedelta(days=90)
+    return now - timedelta(days=7)
+
+
+@api.get("/strategic/overview")
+async def strategic_overview(period: str = "7d",
+                              user: dict = Depends(require_permission("reports.view"))):
+    """Visão executiva consolidada: top números, ranking agentes, heatmap,
+    SLA por fila, abandono e conversão (via QA)."""
+    f = tenant_filter(user)
+    cutoff = _period_to_cutoff(period).isoformat()
+    base_match = {**f, "started_at": {"$gte": cutoff}}
+
+    # ─── 1) Totais top-line ─────────────────────────────────────────
+    total_calls = await db.calls.count_documents(base_match)
+    answered = await db.calls.count_documents({**base_match, "disposition": "answered"})
+    missed = await db.calls.count_documents({**base_match, "disposition": {"$in": ["missed", "abandoned"]}})
+    inbound = await db.calls.count_documents({**base_match, "direction": "inbound"})
+    outbound = await db.calls.count_documents({**base_match, "direction": "outbound"})
+
+    # Tempo médio de atendimento (AHT) e espera (ASA)
+    aht_pipeline = [
+        {"$match": {**base_match, "disposition": "answered"}},
+        {"$group": {"_id": None,
+                     "avg_handle": {"$avg": "$duration_sec"},
+                     "avg_wait": {"$avg": "$wait_sec"}}},
+    ]
+    aht_doc = await db.calls.aggregate(aht_pipeline).to_list(1)
+    avg_handle = int(aht_doc[0]["avg_handle"]) if aht_doc and aht_doc[0].get("avg_handle") else 0
+    avg_wait = int(aht_doc[0]["avg_wait"]) if aht_doc and aht_doc[0].get("avg_wait") else 0
+
+    # ─── 2) Top 10 números (entrante e saída) ─────────────────────
+    async def _top_numbers(direction: str, number_field: str, limit: int = 10):
+        pipeline = [
+            {"$match": {**base_match, "direction": direction,
+                         number_field: {"$ne": None, "$ne": ""}}},
+            {"$group": {"_id": f"${number_field}",
+                         "count": {"$sum": 1},
+                         "answered": {"$sum": {"$cond": [{"$eq": ["$disposition", "answered"]}, 1, 0]}},
+                         "total_duration": {"$sum": "$duration_sec"}}},
+            {"$sort": {"count": -1}},
+            {"$limit": limit},
+        ]
+        rows = []
+        async for r in db.calls.aggregate(pipeline):
+            rows.append({
+                "number": r["_id"],
+                "calls": r["count"],
+                "answered": r["answered"],
+                "missed": r["count"] - r["answered"],
+                "total_duration_sec": int(r.get("total_duration") or 0),
+            })
+        return rows
+
+    top_inbound = await _top_numbers("inbound", "caller_number")
+    top_outbound = await _top_numbers("outbound", "callee_number")
+
+    # ─── 3) Ranking de agentes ────────────────────────────────────
+    agent_pipeline = [
+        {"$match": {**base_match, "agent_id": {"$ne": None}}},
+        {"$group": {"_id": "$agent_id",
+                     "agent_name": {"$first": "$agent_name"},
+                     "calls": {"$sum": 1},
+                     "answered": {"$sum": {"$cond": [{"$eq": ["$disposition", "answered"]}, 1, 0]}},
+                     "missed": {"$sum": {"$cond": [{"$in": ["$disposition", ["missed", "abandoned"]]}, 1, 0]}},
+                     "total_duration": {"$sum": "$duration_sec"},
+                     "total_wait": {"$sum": "$wait_sec"}}},
+        {"$sort": {"answered": -1}},
+        {"$limit": 50},
+    ]
+    agent_rows = []
+    agent_ids = []
+    async for r in db.calls.aggregate(agent_pipeline):
+        agent_ids.append(r["_id"])
+        agent_rows.append({
+            "agent_id": r["_id"],
+            "agent_name": r.get("agent_name") or "—",
+            "calls": r["calls"],
+            "answered": r["answered"],
+            "missed": r["missed"],
+            "answer_rate": round((r["answered"] / r["calls"]) * 100, 1) if r["calls"] else 0,
+            "avg_handle_sec": int(r["total_duration"] / r["answered"]) if r["answered"] else 0,
+            "avg_wait_sec": int(r["total_wait"] / r["calls"]) if r["calls"] else 0,
+            "qa_avg": None,
+            "qa_count": 0,
+            "conversion_rate": 0.0,
+        })
+
+    # ─── 4) QA scores por agente (conversão proxy) ────────────────
+    # nota >= 4 considerada "conversão bem-sucedida"
+    if agent_ids:
+        qa_pipeline = [
+            {"$match": {**f, "agent_id": {"$in": agent_ids},
+                         "created_at": {"$gte": cutoff}}},
+            {"$group": {"_id": "$agent_id",
+                         "avg_score": {"$avg": "$score"},
+                         "count": {"$sum": 1},
+                         "good": {"$sum": {"$cond": [{"$gte": ["$score", 4]}, 1, 0]}}}},
+        ]
+        qa_map = {}
+        async for r in db.recording_evaluations.aggregate(qa_pipeline):
+            qa_map[r["_id"]] = r
+        for row in agent_rows:
+            qa = qa_map.get(row["agent_id"])
+            if qa and qa.get("count"):
+                row["qa_avg"] = round(qa["avg_score"], 2)
+                row["qa_count"] = qa["count"]
+                row["conversion_rate"] = round((qa["good"] / qa["count"]) * 100, 1)
+
+    # ─── 5) Heatmap (dia da semana × hora) ────────────────────────
+    # Grid 7x24. Dia 0=Segunda, 6=Domingo. Português brasileiro.
+    heatmap = [[0 for _ in range(24)] for _ in range(7)]
+    async for c in db.calls.find(base_match, {"_id": 0, "started_at": 1}):
+        try:
+            dt = datetime.fromisoformat(c["started_at"])
+            heatmap[dt.weekday()][dt.hour] += 1
+        except Exception:
+            pass
+
+    # ─── 6) SLA por fila (espera × abandono) ──────────────────────
+    queue_pipeline = [
+        {"$match": {**base_match, "queue_id": {"$ne": None}}},
+        {"$group": {"_id": "$queue_id",
+                     "queue_name": {"$first": "$queue_name"},
+                     "calls": {"$sum": 1},
+                     "answered": {"$sum": {"$cond": [{"$eq": ["$disposition", "answered"]}, 1, 0]}},
+                     "abandoned": {"$sum": {"$cond": [{"$in": ["$disposition", ["missed", "abandoned"]]}, 1, 0]}},
+                     "total_wait_answered": {
+                         "$sum": {"$cond": [{"$eq": ["$disposition", "answered"]}, "$wait_sec", 0]}},
+                     "total_wait_abandoned": {
+                         "$sum": {"$cond": [{"$in": ["$disposition", ["missed", "abandoned"]]}, "$wait_sec", 0]}},
+                     "sla_within_20s": {
+                         "$sum": {"$cond": [
+                             {"$and": [{"$eq": ["$disposition", "answered"]},
+                                        {"$lte": ["$wait_sec", 20]}]}, 1, 0]}}}},
+        {"$sort": {"calls": -1}},
+    ]
+    queue_rows = []
+    async for r in db.calls.aggregate(queue_pipeline):
+        ans = r["answered"] or 0
+        aban = r["abandoned"] or 0
+        total = r["calls"] or 0
+        queue_rows.append({
+            "queue_id": r["_id"],
+            "queue_name": r.get("queue_name") or "—",
+            "calls": total,
+            "answered": ans,
+            "abandoned": aban,
+            "abandon_rate": round((aban / total) * 100, 1) if total else 0,
+            "avg_wait_sec": int(r["total_wait_answered"] / ans) if ans else 0,
+            "avg_abandon_sec": int(r["total_wait_abandoned"] / aban) if aban else 0,
+            "sla_20s_rate": round((r["sla_within_20s"] / ans) * 100, 1) if ans else 0,
+        })
+
+    # ─── 7) Conversão geral (via QA) ──────────────────────────────
+    qa_global = await db.recording_evaluations.aggregate([
+        {"$match": {**f, "created_at": {"$gte": cutoff}}},
+        {"$group": {"_id": None,
+                     "total": {"$sum": 1},
+                     "good": {"$sum": {"$cond": [{"$gte": ["$score", 4]}, 1, 0]}},
+                     "avg_score": {"$avg": "$score"}}},
+    ]).to_list(1)
+    conversion = {
+        "evaluated_calls": qa_global[0]["total"] if qa_global else 0,
+        "conversions": qa_global[0]["good"] if qa_global else 0,
+        "conversion_rate": round((qa_global[0]["good"] / qa_global[0]["total"]) * 100, 1)
+            if qa_global and qa_global[0]["total"] else 0,
+        "avg_qa_score": round(qa_global[0]["avg_score"], 2)
+            if qa_global and qa_global[0].get("avg_score") else 0,
+        "explainer": "Conversão calculada a partir da Auditoria QA: chamadas com nota ≥ 4 são consideradas conversões bem-sucedidas.",
+    }
+
+    return {
+        "period": period,
+        "summary": {
+            "total_calls": total_calls,
+            "answered": answered,
+            "missed": missed,
+            "inbound": inbound,
+            "outbound": outbound,
+            "answer_rate": round((answered / total_calls) * 100, 1) if total_calls else 0,
+            "avg_handle_sec": avg_handle,
+            "avg_wait_sec": avg_wait,
+        },
+        "top_inbound": top_inbound,
+        "top_outbound": top_outbound,
+        "agent_ranking": agent_rows,
+        "heatmap": heatmap,
+        "queue_sla": queue_rows,
+        "conversion": conversion,
+    }
+
+
 # ---------- Billing: Charges (Asaas + PayPal) ----------
 class ChargeCreate(BaseModel):
     tenant_id: str

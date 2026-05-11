@@ -80,4 +80,16 @@ See `/app/memory/test_credentials.md`.
 ## Changelog (recent)
 - 2026-02: Fix — `GET /api/agents` agora exclui ramais por padrão (`include_extensions=False`). Ramais ficam exclusivamente em `/api/extensions`. Mantido parâmetro `?include_extensions=true` para compatibilidade/debug. (server.py list_agents)
 - 2026-05-08: **Provisionamento bulk via CSV** — Nova UI em `/provisioning` com botão "Importar CSV" e diálogo de upload. Endpoints: `GET /api/provisioning/devices/template.csv` (download de template) e `POST /api/provisioning/devices/bulk-import` (multipart). Validação all-or-nothing: se qualquer linha tiver MAC duplicado (planilha ou banco), MAC inválido, vendor inválido, ramal inválido ou senha vazia, NENHUM aparelho é importado e a lista completa de erros é retornada por linha. Aceita separador `,` ou `;`, e MAC com `:` `-` ou sem. Rollback automático em caso de falha de geração de arquivo.
+- 2026-05-08: **Bug fix — Manager PBX `_get_db_client` shadowing** — Renomeada a segunda função de provisionamento para `_get_db_client_by_tid(tid)` para não sobrescrever a do Manager PBX `_get_db_client(user)`. Resolve o erro genérico "FusionPBX não configurado" ao abrir "Editar ramal".
+- 2026-05-09: **Cisco 6921/6941 templates** — Adicionados em `/app/frontend/public/cisco-templates/` os arquivos `SEP<MAC>.cnf.xml`, `SIPDefault.cnf`, `dialplan.xml` e script `voxyra-fusionpbx-patch.sh` para resolver o loop de 401 do Cisco SIP 9.4.1 em ambientes multi-tenant.
+- 2026-05-11: **P1b — Página Estratégica** (Onda 2) — Nova página `/strategic` com KPIs executivos consolidados em 5 abas:
+  - **Top KPIs**: Total chamadas, atendidas, perdidas, TMA, TME, Conversão
+  - **Top Números**: Top 10 entrantes + Top 10 saídas com barras proporcionais
+  - **Ranking Agentes**: tabela ordenável por qualquer coluna (chamadas, atend., %atend., TMA, TME, QA média, %conversão)
+  - **Mapa de Calor**: grid 7×24 (dia × hora) com gradiente de cor por intensidade
+  - **SLA por Fila**: % abandono, TME, tempo médio até abandono, SLA 20s (% chamadas atendidas em ≤20s)
+  - **Conversão**: derivada da Auditoria QA (nota ≥4 = conversão); ranking dos top conversores
+  - Endpoint único: `GET /api/strategic/overview?period=today|7d|30d|90d`
+  - Permissão: `reports.view`
+  - Item de menu lateral "Estratégica" (ícone TrendingUp) entre Relatórios e Filas
 
